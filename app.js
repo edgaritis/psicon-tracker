@@ -7,6 +7,14 @@
   const { useState, useEffect, useMemo, useRef, useCallback } = window.preactHooks;
   const html = window.htm.bind(h);
 
+  // ---------------- Supabase config ----------------
+  const SUPABASE_URL = 'https://oanejkkwzrzfjuboocwd.supabase.co';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hbmVqa2t3enJ6Zmp1Ym9vY3dkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIyMDU2ODAsImV4cCI6MjA5Nzc4MTY4MH0.aMHIJ75CULIn2tqPlPlCfhiq5FyYZ3wrUNLL_jPTPIg';
+  const supa = (window.supabase && typeof window.supabase.createClient === 'function')
+    ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } })
+    : null;
+  if (!supa) console.warn('Supabase library not loaded — cloud sync disabled.');
+
   // ---------------- Constants ----------------
   const CATEGORIES = ['3points', 'question', 'howto', 'identity', 'list', 'script', 'prompt', 'quote', 'psychstory'];
   const CAT_COLORS = {
@@ -168,10 +176,148 @@
     const [mdPreview, setMdPreview] = useState(null);
     const [dragActive, setDragActive] = useState(false);
 
+    // ---- Cloud sync state ----
+    const [auth, setAuth] = useState({ status: 'loading', user: null });
+    const [syncStatus, setSyncStatus] = useState({ state: 'idle', lastAt: null, error: null });
+    const [showAuth, setShowAuth] = useState(false);
+    const [authEmail, setAuthEmail] = useState('');
+    const [authMsg, setAuthMsg] = useState('');
+    const [mergeChoice, setMergeChoice] = useState(null);
+    const pullDoneRef = useRef(false);
+    const pushTimerRef = useRef(null);
+
     // ----- Persistence -----
     useEffect(() => { saveJson(STORAGE_KEY, posts); }, [posts]);
     useEffect(() => { saveJson(DEFAULTS_KEY, defaults); }, [defaults]);
     useEffect(() => { saveJson(VIEWS_KEY, savedViews); }, [savedViews]);
+
+    // ----- Auth subscription -----
+    useEffect(() => {
+      if (!supa) { setAuth({ status: 'signedOut', user: null }); return; }
+      supa.auth.getSession().then(({ data }) => {
+        if (data && data.session) setAuth({ status: 'signedIn', user: data.session.user });
+        else setAuth({ status: 'signedOut', user: null });
+      });
+      const sub = supa.auth.onAuthStateChange((event, session) => {
+        if (session) setAuth({ status: 'signedIn', user: session.user });
+        else { setAuth({ status: 'signedOut', user: null }); pullDoneRef.current = false; setSyncStatus({ state: 'idle', lastAt: null, error: null }); }
+      });
+      return () => { try { sub.data.subscription.unsubscribe(); } catch (e) {} };
+    }, []);
+
+    // ----- Push to cloud (debounced) -----
+    const pushNow = useCallback(async () => {
+      if (!supa || auth.status !== 'signedIn' || !auth.user) return;
+      if (!pullDoneRef.current) return; // don't overwrite cloud until we've pulled first
+      setSyncStatus(s => ({ ...s, state: 'syncing', error: null }));
+      try {
+        const { error } = await supa.from('tracker_state').upsert({
+          user_id: auth.user.id,
+          posts,
+          defaults,
+          saved_views: savedViews,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'user_id' });
+        if (error) throw error;
+        setSyncStatus({ state: 'synced', lastAt: Date.now(), error: null });
+      } catch (err) {
+        console.warn('sync push failed', err);
+        setSyncStatus({ state: 'error', lastAt: null, error: err.message || String(err) });
+      }
+    }, [auth, posts, defaults, savedViews]);
+
+    // ----- Pull from cloud on sign-in -----
+    useEffect(() => {
+      if (auth.status !== 'signedIn' || !auth.user) return;
+      if (pullDoneRef.current) return;
+      setSyncStatus(s => ({ ...s, state: 'syncing', error: null }));
+      (async () => {
+        try {
+          const { data, error } = await supa.from('tracker_state').select().eq('user_id', auth.user.id).maybeSingle();
+          if (error && error.code !== 'PGRST116') throw error;
+          if (!data) {
+            // No cloud row yet — push local up as the initial state
+            pullDoneRef.current = true;
+            await pushNow();
+            return;
+          }
+          const cloudPosts = Array.isArray(data.posts) ? data.posts : [];
+          if (posts.length === 0 || cloudPosts.length === 0) {
+            // No conflict — apply whichever has data
+            if (cloudPosts.length > 0) {
+              setPosts(cloudPosts.map(migratePost));
+              if (data.defaults) setDefaults(data.defaults);
+              if (Array.isArray(data.saved_views)) setSavedViews(data.saved_views);
+            }
+            pullDoneRef.current = true;
+            setSyncStatus({ state: 'synced', lastAt: Date.now(), error: null });
+            return;
+          }
+          // Both have data — ask the user
+          setMergeChoice({
+            local: { posts: posts.length },
+            cloud: { posts: cloudPosts.length, defaults: data.defaults || {}, savedViews: data.saved_views || [], updatedAt: data.updated_at },
+            cloudData: data,
+          });
+          setSyncStatus({ state: 'idle', lastAt: null, error: null });
+        } catch (err) {
+          console.warn('sync pull failed', err);
+          setSyncStatus({ state: 'error', lastAt: null, error: err.message || String(err) });
+        }
+      })();
+    }, [auth.status, auth.user && auth.user.id]);
+
+    // ----- Auto-push on data changes -----
+    useEffect(() => {
+      if (!supa || auth.status !== 'signedIn' || !pullDoneRef.current) return;
+      if (pushTimerRef.current) clearTimeout(pushTimerRef.current);
+      pushTimerRef.current = setTimeout(() => pushNow(), 1500);
+      return () => { if (pushTimerRef.current) clearTimeout(pushTimerRef.current); };
+    }, [posts, defaults, savedViews, auth.status]);
+
+    // ----- Merge-choice handlers -----
+    const acceptCloud = () => {
+      if (!mergeChoice) return;
+      const d = mergeChoice.cloudData;
+      const cloudPosts = Array.isArray(d.posts) ? d.posts : [];
+      setPosts(cloudPosts.map(migratePost));
+      if (d.defaults) setDefaults(d.defaults);
+      if (Array.isArray(d.saved_views)) setSavedViews(d.saved_views);
+      pullDoneRef.current = true;
+      setMergeChoice(null);
+      setSyncStatus({ state: 'synced', lastAt: Date.now(), error: null });
+    };
+    const acceptLocal = () => {
+      pullDoneRef.current = true;
+      setMergeChoice(null);
+      pushNow();
+    };
+
+    // ----- Auth actions -----
+    const startSignIn = async () => {
+      if (!supa) { alert('Sync not available.'); return; }
+      const email = (authEmail || '').trim();
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setAuthMsg('Enter a valid email address.'); return; }
+      setAuthMsg('Sending magic link…');
+      const { error } = await supa.auth.signInWithOtp({
+        email,
+        options: { emailRedirectTo: window.location.origin + window.location.pathname },
+      });
+      if (error) { setAuthMsg('Error: ' + error.message); return; }
+      setAuthMsg('Magic link sent to ' + email + '. Open the email on this device and click the link.');
+    };
+    const doSignOut = async () => {
+      if (!confirm('Sign out? Your data stays on this device. Sign in again to sync across devices.')) return;
+      try { await supa.auth.signOut(); } catch (e) { console.warn(e); }
+      setShowAuth(false);
+    };
+    const manualSync = async () => {
+      if (auth.status !== 'signedIn') return;
+      if (pushTimerRef.current) { clearTimeout(pushTimerRef.current); pushTimerRef.current = null; }
+      await pushNow();
+    };
+
+
 
     // ----- First-load seed (only if no posts yet) -----
     useEffect(() => {
@@ -554,6 +700,8 @@
     // ----- Render -----
     return html`
       ${PickModal({ open: modal === 'pick', post: pickPost, close: () => setModal(null), publish: () => pickAct('published'), schedule: () => pickAct('scheduled'), reject: () => pickAct('rejected'), skip: pickSkip, toggleImage: () => updatePost(pickId, { formats: { ...(pickPost && pickPost.formats || {}), image: !((pickPost && pickPost.formats || {}).image) } }), toggleReels: () => updatePost(pickId, { formats: { ...(pickPost && pickPost.formats || {}), reels: !((pickPost && pickPost.formats || {}).reels) } }), togglePage: () => updatePost(pickId, { destinations: { ...(pickPost && pickPost.destinations || {}), page: !((pickPost && pickPost.destinations || {}).page) } }), toggleGroup: () => updatePost(pickId, { destinations: { ...(pickPost && pickPost.destinations || {}), group: !((pickPost && pickPost.destinations || {}).group) } }), resetAndPick: () => { resetFilters(); setTimeout(() => setPickId(randomDraftId()), 50); }, draftCount: posts.filter(p => (p.status || 'draft') === 'draft').length })}
+      ${AuthModal({ open: showAuth, close: () => { setShowAuth(false); setAuthMsg(''); }, auth, syncStatus, email: authEmail, setEmail: setAuthEmail, msg: authMsg, signIn: startSignIn, signOut: doSignOut, manualSync })}
+      ${MergeChoiceModal({ open: !!mergeChoice, choice: mergeChoice, acceptCloud, acceptLocal })}
       ${NewModal({ open: modal === 'new', close: () => setModal(null), form: newForm, setForm: setNewForm, submit: submitNew, defaultsToForm })}
       ${DefaultsModal({ open: modal === 'defaults', close: () => setModal(null), defaults, setDefault, applyToDrafts: applyDefaultsToDrafts })}
       ${SaveViewModal({ open: modal === 'saveView', close: () => setModal(null), name: viewName, setName: setViewName, submit: saveView })}
@@ -602,6 +750,16 @@
               <input type="file" accept=".json,application/json" onChange=${handleImportJsonFile} style="display: none;" />
             </label>
             <button onClick=${() => setModal('help')} title="Keyboard shortcuts (?)" style="display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; background: #fff; color: #4a6fa5; border: 1px solid #dde4ef; border-radius: 6px; font-size: 13px; font-weight: 700; cursor: pointer;">?</button>
+            <button onClick=${() => { setAuthMsg(''); setShowAuth(true); }} title=${auth.status === 'signedIn' ? 'Cloud sync · ' + (auth.user && auth.user.email) : 'Sign in to sync across devices'} style="display: inline-flex; align-items: center; gap: 7px; padding: 9px 12px; background: ${auth.status === 'signedIn' ? (syncStatus.state === 'error' ? '#fdecec' : '#e6f3eb') : '#fff'}; color: ${auth.status === 'signedIn' ? (syncStatus.state === 'error' ? '#c44545' : '#2d7a4a') : '#0d2340'}; border: 1px solid ${auth.status === 'signedIn' ? (syncStatus.state === 'error' ? '#f5c8c8' : '#c5e2d0') : '#dde4ef'}; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;">
+              ${auth.status === 'signedIn'
+                ? (syncStatus.state === 'syncing'
+                    ? html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: spin 1s linear infinite;"><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>`
+                    : (syncStatus.state === 'error'
+                      ? html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><circle cx="12" cy="12" r="10"/></svg>`
+                      : html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>`))
+                : html`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg>`}
+              <span class="ct_btn_label">${auth.status === 'signedIn' ? (syncStatus.state === 'syncing' ? 'Syncing…' : syncStatus.state === 'error' ? 'Sync error' : 'Synced') : 'Sign in to sync'}</span>
+            </button>
             <div style="width: 1px; height: 28px; background: #dde4ef; margin: 0 4px;"></div>
             <button onClick=${openNew} title="New post (N)" style="display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: #0d2340; color: #fff; border: none; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer;">
               <span style="font-size: 16px; line-height: 1;">+</span> <span class="ct_btn_label">New post</span>
@@ -1083,6 +1241,82 @@
         <button onClick=${confirm} disabled=${!preview || preview.newCount === 0} style="padding: 8px 18px; font-size: 12px; font-weight: 700; color: #fff; background: ${preview && preview.newCount > 0 ? '#0d2340' : '#9aa6b8'}; border: none; border-radius: 5px; cursor: ${preview && preview.newCount > 0 ? 'pointer' : 'not-allowed'}; letter-spacing: 0.03em;">${preview ? 'Import ' + preview.newCount + ' new post' + (preview.newCount === 1 ? '' : 's') : 'Pick files first'}</button>
       </div>
     ` });
+  }
+
+  // ---------------- Sync modals ----------------
+  function AuthModal({ open, close, auth, syncStatus, email, setEmail, msg, signIn, signOut, manualSync }) {
+    if (!open) return null;
+    return ModalShell({ open, close, title: 'CLOUD SYNC', maxWidth: 480, children: html`
+      <div style="padding: 22px 24px;">
+        ${auth.status === 'signedIn' ? html`
+          <div style="display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: #f0f9f3; border: 1px solid #c5e2d0; border-radius: 6px; margin-bottom: 16px;">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2d7a4a" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+            <div style="flex: 1;">
+              <div style="font-size: 13px; font-weight: 600; color: #0d2340;">Signed in</div>
+              <div style="font-size: 11px; color: #4a6fa5; font-family: 'JetBrains Mono', monospace;">${auth.user.email || auth.user.id}</div>
+            </div>
+          </div>
+          <div style="padding: 12px 14px; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 6px; margin-bottom: 16px;">
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; margin-bottom: 6px;">Sync status</div>
+            <div style="font-size: 12px; color: #0d2340;">
+              ${syncStatus.state === 'syncing' ? 'Syncing now…'
+                : syncStatus.state === 'synced' ? ('Last synced ' + (syncStatus.lastAt ? new Date(syncStatus.lastAt).toLocaleTimeString() : 'just now') + '. Your changes auto-save to the cloud.')
+                : syncStatus.state === 'error' ? html`<span style="color: #c44545;">Sync error:</span> ${syncStatus.error || 'unknown'}`
+                : 'Waiting…'}
+            </div>
+          </div>
+          <div style="display: flex; gap: 8px; justify-content: space-between;">
+            <button onClick=${manualSync} style="padding: 8px 14px; font-size: 12px; font-weight: 600; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px; cursor: pointer;">Sync now</button>
+            <button onClick=${signOut} style="padding: 8px 14px; font-size: 12px; font-weight: 600; color: #c44545; background: transparent; border: 1px solid #f5c8c8; border-radius: 5px; cursor: pointer;">Sign out</button>
+          </div>
+          <div style="font-size: 11px; color: #7a8db0; margin-top: 14px; line-height: 1.5;">Your data syncs to a private Supabase project keyed by your email. To use on another device, install the PWA there and sign in with the same email.</div>
+        ` : html`
+          <div style="font-size: 13px; color: #0d2340; line-height: 1.55; margin-bottom: 16px;">Sign in with your email to sync your tracker across devices. We'll send a one-click magic link — no password needed.</div>
+          <label style="display: block; margin-bottom: 14px;">
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; margin-bottom: 6px;">Your email</div>
+            <input type="email" value=${email} onInput=${e => setEmail(e.target.value)} placeholder="you@example.com" autoFocus style="width: 100%; padding: 9px 12px; font-size: 13px; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px;" />
+          </label>
+          ${msg ? html`<div style="font-size: 12px; color: ${msg.startsWith('Error') ? '#c44545' : '#2d7a4a'}; background: ${msg.startsWith('Error') ? '#fdecec' : '#f0f9f3'}; border: 1px solid ${msg.startsWith('Error') ? '#f5c8c8' : '#c5e2d0'}; padding: 10px 12px; border-radius: 5px; margin-bottom: 14px; line-height: 1.5;">${msg}</div>` : null}
+          <div style="display: flex; gap: 8px; justify-content: flex-end;">
+            <button onClick=${close} style="padding: 9px 14px; font-size: 12px; font-weight: 600; color: #4a6fa5; background: transparent; border: 1px solid #dde4ef; border-radius: 5px; cursor: pointer;">Cancel</button>
+            <button onClick=${signIn} style="padding: 9px 18px; font-size: 12px; font-weight: 700; color: #fff; background: #0d2340; border: none; border-radius: 5px; cursor: pointer; letter-spacing: 0.03em;">Send magic link</button>
+          </div>
+          <div style="font-size: 11px; color: #7a8db0; margin-top: 14px; line-height: 1.5;">Without sync, your data still saves locally on this device. You can also use Backup / Restore to move data manually.</div>
+        `}
+      </div>
+    ` });
+  }
+
+  function MergeChoiceModal({ open, choice, acceptCloud, acceptLocal }) {
+    if (!open || !choice) return null;
+    return html`
+      <div class="ct_backdrop" style="position: fixed; inset: 0; background: rgba(13, 35, 64, 0.7); z-index: 60; display: flex; align-items: center; justify-content: center; padding: 24px;">
+        <div class="ct_modal" style="width: 100%; max-width: 560px; background: #fff; border-radius: 10px; box-shadow: 0 20px 50px rgba(13, 35, 64, 0.4); overflow: hidden;">
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; background: #c2682a; color: #fff;">
+            <div style="font-size: 13px; font-weight: 700; letter-spacing: 0.04em;">⚠ MERGE CONFLICT</div>
+          </div>
+          <div style="padding: 22px 24px;">
+            <div style="font-size: 13px; color: #0d2340; line-height: 1.55; margin-bottom: 18px;">Both this device and the cloud have tracker data. Pick which one to keep — the other will be overwritten. <strong>This can't be undone.</strong> Use Backup first if you're not sure.</div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px;">
+              <div style="padding: 16px; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 6px;">
+                <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; margin-bottom: 8px;">On this device</div>
+                <div style="font-size: 22px; font-weight: 700; color: #0d2340; margin-bottom: 4px;">${choice.local.posts}</div>
+                <div style="font-size: 11px; color: #7a8db0;">posts</div>
+              </div>
+              <div style="padding: 16px; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 6px;">
+                <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; margin-bottom: 8px;">In the cloud</div>
+                <div style="font-size: 22px; font-weight: 700; color: #0d2340; margin-bottom: 4px;">${choice.cloud.posts}</div>
+                <div style="font-size: 11px; color: #7a8db0;">posts · saved ${choice.cloud.updatedAt ? new Date(choice.cloud.updatedAt).toLocaleString() : 'unknown'}</div>
+              </div>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+              <button onClick=${acceptLocal} style="padding: 12px; font-size: 12px; font-weight: 700; color: #fff; background: #0d2340; border: none; border-radius: 6px; cursor: pointer; letter-spacing: 0.04em;">USE THIS DEVICE'S DATA</button>
+              <button onClick=${acceptCloud} style="padding: 12px; font-size: 12px; font-weight: 700; color: #fff; background: #2d7a4a; border: none; border-radius: 6px; cursor: pointer; letter-spacing: 0.04em;">USE CLOUD DATA</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   // ---------------- Misc ----------------

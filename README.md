@@ -51,10 +51,16 @@ pwa/
 
 ## How data is stored
 
-- Everything lives in your browser's **localStorage** for this domain.
-- Data is **per-device + per-browser**. Your phone and laptop don't share state automatically — use the **Backup** button to export a JSON file and **Restore** to load it on another device.
-- localStorage persists across app close, reboots, browser updates, and offline use.
-- It is wiped if you: clear browser site data, use incognito, or (on iOS) uninstall the PWA.
+By default, everything lives in your browser's **localStorage** for this domain — per-device, per-browser, persistent across reboots.
+
+**Optional cloud sync (Supabase):** click **Sign in to sync** in the header, enter your email, click the magic link in your inbox. After that:
+- Every change auto-syncs to the cloud (1.5s debounce).
+- Open the PWA on another device, sign in with the same email — your data follows.
+- A sync indicator in the header shows current state (syncing · synced · error).
+- Sync is private — only your authenticated session can read or write your data (row-level security on the Supabase side).
+- Works offline too — changes queue locally and push next time you're online.
+
+**Manual backup** (no sign-in needed): click **Backup** to download a JSON file, **Restore** to load one. Good for safety even with cloud sync enabled.
 
 ## Migrating from the design tool
 
