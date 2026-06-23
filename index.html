@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d2340">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PsiCon">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>PsiCon — Content Tracker</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { background: #f4f6fa; font-family: 'Inter', system-ui, sans-serif; color: #0d2340; -webkit-tap-highlight-color: transparent; }
+  button, input, select, textarea { font-family: inherit; }
+  [contenteditable]:focus { outline: none; }
+  ::selection { background: #e8b04a; color: #0d2340; }
+  .row:hover { background: #fbfcfe; }
+  .row.selected { background: #f1f5fc; }
+  ::-webkit-scrollbar { height: 10px; width: 10px; }
+  ::-webkit-scrollbar-thumb { background: #c8d2e3; border-radius: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  @keyframes ct_fade { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes ct_pop  { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+  .ct_backdrop { animation: ct_fade 0.12s ease-out; }
+  .ct_modal { animation: ct_pop 0.15s ease-out; }
+  .dropzone-active { background: #e8f0fc !important; border-color: #1f5cc7 !important; }
+
+  /* --- Responsive --- */
+  @media (max-width: 1200px) {
+    .ct_app { padding: 24px 20px 80px !important; }
+    .ct_stats { grid-template-columns: repeat(5, 1fr) !important; }
+  }
+  @media (max-width: 900px) {
+    .ct_app { padding: 18px 14px 60px !important; }
+    .ct_topbar { flex-wrap: wrap !important; gap: 10px !important; padding-bottom: 14px !important; margin-bottom: 16px !important; }
+    .ct_topbar > div:last-child { flex-wrap: wrap !important; gap: 6px !important; }
+    .ct_h1 { font-size: 22px !important; }
+    .ct_stats { grid-template-columns: repeat(3, 1fr) !important; }
+    .ct_stats > div { padding: 10px 12px !important; }
+    .ct_stat_val { font-size: 18px !important; }
+    .ct_table_header { display: none !important; }
+    .ct_row {
+      display: flex !important;
+      flex-wrap: wrap !important;
+      align-items: center !important;
+      gap: 10px !important;
+      padding: 14px !important;
+      min-height: 0 !important;
+    }
+    .ct_row > * { padding: 0 !important; }
+    .ct_row > *:nth-child(1) { order: 1; }
+    .ct_row > *:nth-child(2) { order: 2; }
+    .ct_row > *:nth-child(3) { order: 3; }
+    .ct_row > *:nth-child(8) { order: 4; margin-left: auto !important; }
+    .ct_row > *:nth-child(4) { order: 5; flex-basis: 100%; }
+    .ct_row > *:nth-child(5) { order: 6; flex-direction: row !important; }
+    .ct_row > *:nth-child(6) { order: 7; flex-direction: row !important; }
+    .ct_row > *:nth-child(7) { order: 8; flex-basis: 100%; }
+    .ct_footer { flex-direction: column !important; align-items: stretch !important; gap: 12px !important; }
+    .ct_footer > div { flex-wrap: wrap !important; }
+  }
+  @media (max-width: 520px) {
+    .ct_stats { grid-template-columns: repeat(2, 1fr) !important; }
+    .ct_btn_label { display: none !important; }
+    .ct_h1 { font-size: 20px !important; }
+    .ct_app { padding: 14px 10px 60px !important; }
+    .ct_row { padding: 12px !important; }
+  }
+</style>
+</head>
+<body>
+<div id="root">
+  <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 14px;">
+    <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600; letter-spacing: 0.14em; color: #4a6fa5; text-transform: uppercase;">Loading PsiCon Tracker…</div>
+    <div style="width: 32px; height: 32px; border: 3px solid #dde4ef; border-top-color: #0d2340; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+  </div>
+  <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+</div>
+
+<!-- Libraries (UMD bundles cached offline by the service worker) -->
+<script src="https://unpkg.com/preact@10.19.6/dist/preact.umd.js"></script>
+<script src="https://unpkg.com/preact@10.19.6/hooks/dist/hooks.umd.js"></script>
+<script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="app.js?v=6"></script>
+
+<script>
+  // Register service worker for offline support + installability.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('sw.js').catch((err) => {
+        console.warn('SW registration failed:', err);
+      });
+    });
+  }
+</script>
+</body>
+</html>
