@@ -34,6 +34,7 @@
   const DEFAULTS_KEY = 'psicon_tracker_defaults';
   const VIEWS_KEY = 'psicon_tracker_views';
   const SEED_FLAG_KEY = 'psicon_tracker_seed_loaded';
+  const linkedKey = (userId) => 'psicon_tracker_linked_' + userId;
 
   // ---------------- Helpers ----------------
   function normTitle(t) { return (t || '').toLowerCase().replace(/[^a-z0-9áéíóúüñ ]/gi, '').replace(/\s+/g, ' ').trim(); }
@@ -233,17 +234,20 @@
       setSyncStatus(s => ({ ...s, state: 'syncing', error: null }));
       (async () => {
         try {
-          const { data, error } = await supa.from('tracker_state').select().eq('user_id', auth.user.id).maybeSingle();
+          const userId = auth.user.id;
+          const linked = !!localStorage.getItem(linkedKey(userId));
+          const { data, error } = await supa.from('tracker_state').select().eq('user_id', userId).maybeSingle();
           if (error && error.code !== 'PGRST116') throw error;
           if (!data) {
             // No cloud row yet — push local up as the initial state
             pullDoneRef.current = true;
+            localStorage.setItem(linkedKey(userId), '1');
             await pushNow();
             return;
           }
           const cloudPosts = Array.isArray(data.posts) ? data.posts : [];
-          if (posts.length === 0 || cloudPosts.length === 0) {
-            // No conflict — apply whichever has data
+          // Already linked on this device — cloud is the source of truth, apply silently.
+          if (linked) {
             if (cloudPosts.length > 0) {
               setPosts(cloudPosts.map(migratePost));
               if (data.defaults) setDefaults(data.defaults);
@@ -253,7 +257,19 @@
             setSyncStatus({ state: 'synced', lastAt: Date.now(), error: null });
             return;
           }
-          // Both have data — ask the user
+          // First sign-in on this device — pick the obvious side if one is empty.
+          if (posts.length === 0 || cloudPosts.length === 0) {
+            if (cloudPosts.length > 0) {
+              setPosts(cloudPosts.map(migratePost));
+              if (data.defaults) setDefaults(data.defaults);
+              if (Array.isArray(data.saved_views)) setSavedViews(data.saved_views);
+            }
+            pullDoneRef.current = true;
+            localStorage.setItem(linkedKey(userId), '1');
+            setSyncStatus({ state: 'synced', lastAt: Date.now(), error: null });
+            return;
+          }
+          // Both have data and we've never synced this device — genuine first-time conflict.
           setMergeChoice({
             local: { posts: posts.length },
             cloud: { posts: cloudPosts.length, defaults: data.defaults || {}, savedViews: data.saved_views || [], updatedAt: data.updated_at },
@@ -284,11 +300,13 @@
       if (d.defaults) setDefaults(d.defaults);
       if (Array.isArray(d.saved_views)) setSavedViews(d.saved_views);
       pullDoneRef.current = true;
+      if (auth.user) localStorage.setItem(linkedKey(auth.user.id), '1');
       setMergeChoice(null);
       setSyncStatus({ state: 'synced', lastAt: Date.now(), error: null });
     };
     const acceptLocal = () => {
       pullDoneRef.current = true;
+      if (auth.user) localStorage.setItem(linkedKey(auth.user.id), '1');
       setMergeChoice(null);
       pushNow();
     };
