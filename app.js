@@ -334,11 +334,47 @@
     const verifyCode = async () => {
       if (!supa) return;
       const email = (authEmail || '').trim();
-      const token = (authCode || '').trim().replace(/\s/g, '');
-      if (!token) { setAuthMsg('Enter the 6-digit code from your email.'); return; }
+      const raw = (authCode || '').trim();
+      if (!raw) { setAuthMsg('Paste the link from your email, or type the 6-digit code.'); return; }
       setAuthMsg('Verifying…');
-      const { error } = await supa.auth.verifyOtp({ email, token, type: 'email' });
-      if (error) { setAuthMsg('Error: ' + error.message); return; }
+
+      // If the input contains a URL, extract token / token_hash and verify with that.
+      let result;
+      if (/https?:\/\//i.test(raw)) {
+        try {
+          const u = new URL(raw);
+          const token = u.searchParams.get('token');
+          const tokenHash = u.searchParams.get('token_hash');
+          const type = u.searchParams.get('type') || 'magiclink';
+          // Some links use a #fragment with access_token=… (recovery / older flows).
+          if (!token && !tokenHash && u.hash && u.hash.length > 1) {
+            const frag = new URLSearchParams(u.hash.replace(/^#/, ''));
+            const accessToken = frag.get('access_token');
+            const refreshToken = frag.get('refresh_token');
+            if (accessToken && refreshToken) {
+              const { error } = await supa.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+              if (error) { setAuthMsg('Error: ' + error.message); return; }
+              setAuthMsg(''); setAuthStage('email'); setAuthCode(''); setShowAuth(false);
+              return;
+            }
+          }
+          if (tokenHash) {
+            result = await supa.auth.verifyOtp({ token_hash: tokenHash, type });
+          } else if (token) {
+            result = await supa.auth.verifyOtp({ email, token, type });
+          } else {
+            setAuthMsg('Could not find a sign-in token in that link.'); return;
+          }
+        } catch (err) {
+          setAuthMsg('Error: ' + (err.message || String(err))); return;
+        }
+      } else {
+        // Plain numeric code path
+        const token = raw.replace(/\s/g, '');
+        result = await supa.auth.verifyOtp({ email, token, type: 'email' });
+      }
+
+      if (result && result.error) { setAuthMsg('Error: ' + result.error.message); return; }
       setAuthMsg('');
       setAuthStage('email');
       setAuthCode('');
@@ -1310,19 +1346,20 @@
           </div>
           <div style="font-size: 11px; color: #7a8db0; margin-top: 14px; line-height: 1.5;">Your data syncs to a private Supabase project keyed by your email. To use on another device, install the PWA there and sign in with the same email.</div>
         ` : stage === 'code' ? html`
-          <div style="font-size: 13px; color: #0d2340; line-height: 1.55; margin-bottom: 6px;">A 6-digit code was sent to:</div>
+          <div style="font-size: 13px; color: #0d2340; line-height: 1.55; margin-bottom: 6px;">A sign-in email was sent to:</div>
           <div style="font-size: 13px; font-weight: 600; color: #0d2340; font-family: 'JetBrains Mono', monospace; margin-bottom: 16px;">${email}</div>
-          <div style="font-size: 12px; color: #7a8db0; line-height: 1.5; margin-bottom: 14px;">Open the email and type the code below. (The clickable link in the email won't work inside an installed PWA on iOS — use the code instead.)</div>
+          <div style="font-size: 12px; color: #0d2340; line-height: 1.5; margin-bottom: 6px;">📋 <strong>From the email, copy the "Sign in" link and paste it below.</strong> (Don't tap the link — it opens in Safari, not in the installed app.)</div>
+          <div style="font-size: 11px; color: #7a8db0; line-height: 1.5; margin-bottom: 14px;">In Apple Mail: long-press the "Sign in" link → "Copy Link". In Gmail: tap the three dots next to the link → "Copy link". Then paste here:</div>
           <label style="display: block; margin-bottom: 14px;">
-            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; margin-bottom: 6px;">Code</div>
-            <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" value=${code} onInput=${e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="123456" autoFocus style="width: 100%; padding: 12px 16px; font-size: 22px; letter-spacing: 0.4em; text-align: center; font-weight: 700; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px; font-family: 'JetBrains Mono', monospace;" />
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; margin-bottom: 6px;">Pasted link (or 6-digit code)</div>
+            <textarea value=${code} onInput=${e => setCode(e.target.value)} placeholder="https://... (paste the whole link)" autoFocus rows="3" style="width: 100%; padding: 10px 12px; font-size: 12px; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px; font-family: 'JetBrains Mono', monospace; resize: vertical; line-height: 1.4;"></textarea>
           </label>
           ${msg ? html`<div style="font-size: 12px; color: ${msg.startsWith('Error') ? '#c44545' : '#2d7a4a'}; background: ${msg.startsWith('Error') ? '#fdecec' : '#f0f9f3'}; border: 1px solid ${msg.startsWith('Error') ? '#f5c8c8' : '#c5e2d0'}; padding: 10px 12px; border-radius: 5px; margin-bottom: 14px; line-height: 1.5;">${msg}</div>` : null}
           <div style="display: flex; gap: 8px; justify-content: space-between; align-items: center;">
             <button onClick=${back} style="padding: 9px 14px; font-size: 12px; font-weight: 600; color: #4a6fa5; background: transparent; border: 1px solid #dde4ef; border-radius: 5px; cursor: pointer;">← Change email</button>
-            <button onClick=${verify} style="padding: 9px 22px; font-size: 12px; font-weight: 700; color: #fff; background: #0d2340; border: none; border-radius: 5px; cursor: pointer; letter-spacing: 0.03em;">Verify &amp; sign in</button>
+            <button onClick=${verify} style="padding: 9px 22px; font-size: 12px; font-weight: 700; color: #fff; background: #0d2340; border: none; border-radius: 5px; cursor: pointer; letter-spacing: 0.03em;">Sign in</button>
           </div>
-          <div style="font-size: 11px; color: #7a8db0; margin-top: 14px; line-height: 1.5;">Didn't get it? Check spam. Or <button onClick=${signIn} style="background: none; border: none; padding: 0; color: #1f5cc7; font-size: 11px; font-weight: 600; cursor: pointer; text-decoration: underline;">send a new code</button> (waits up to ~1 min between sends).</div>
+          <div style="font-size: 11px; color: #7a8db0; margin-top: 14px; line-height: 1.5;">Didn't get it? Check spam. Or <button onClick=${signIn} style="background: none; border: none; padding: 0; color: #1f5cc7; font-size: 11px; font-weight: 600; cursor: pointer; text-decoration: underline;">send a new email</button> (waits up to ~1 min between sends).</div>
         ` : html`
           <div style="font-size: 13px; color: #0d2340; line-height: 1.55; margin-bottom: 16px;">Sign in with your email to sync your tracker across devices. We'll email you a 6-digit code — no password needed.</div>
           <label style="display: block; margin-bottom: 14px;">
