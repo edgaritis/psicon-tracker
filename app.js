@@ -182,6 +182,8 @@
     const [syncStatus, setSyncStatus] = useState({ state: 'idle', lastAt: null, error: null });
     const [showAuth, setShowAuth] = useState(false);
     const [authEmail, setAuthEmail] = useState('');
+    const [authCode, setAuthCode] = useState('');
+    const [authStage, setAuthStage] = useState('email'); // 'email' | 'code'
     const [authMsg, setAuthMsg] = useState('');
     const [mergeChoice, setMergeChoice] = useState(null);
     const pullDoneRef = useRef(false);
@@ -316,14 +318,33 @@
       if (!supa) { alert('Sync not available.'); return; }
       const email = (authEmail || '').trim();
       if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setAuthMsg('Enter a valid email address.'); return; }
-      setAuthMsg('Sending magic link…');
+      setAuthMsg('Sending code…');
       const { error } = await supa.auth.signInWithOtp({
         email,
-        options: { emailRedirectTo: window.location.origin + window.location.pathname },
+        options: {
+          shouldCreateUser: true,
+          emailRedirectTo: window.location.origin + window.location.pathname,
+        },
       });
       if (error) { setAuthMsg('Error: ' + error.message); return; }
-      setAuthMsg('Magic link sent to ' + email + '. Open the email on this device and click the link.');
+      setAuthMsg('');
+      setAuthStage('code');
+      setAuthCode('');
     };
+    const verifyCode = async () => {
+      if (!supa) return;
+      const email = (authEmail || '').trim();
+      const token = (authCode || '').trim().replace(/\s/g, '');
+      if (!token) { setAuthMsg('Enter the 6-digit code from your email.'); return; }
+      setAuthMsg('Verifying…');
+      const { error } = await supa.auth.verifyOtp({ email, token, type: 'email' });
+      if (error) { setAuthMsg('Error: ' + error.message); return; }
+      setAuthMsg('');
+      setAuthStage('email');
+      setAuthCode('');
+      setShowAuth(false);
+    };
+    const resetAuthStage = () => { setAuthStage('email'); setAuthCode(''); setAuthMsg(''); };
     const doSignOut = async () => {
       if (!confirm('Sign out? Your data stays on this device. Sign in again to sync across devices.')) return;
       try { await supa.auth.signOut(); } catch (e) { console.warn(e); }
@@ -718,7 +739,7 @@
     // ----- Render -----
     return html`
       ${PickModal({ open: modal === 'pick', post: pickPost, close: () => setModal(null), publish: () => pickAct('published'), schedule: () => pickAct('scheduled'), reject: () => pickAct('rejected'), skip: pickSkip, toggleImage: () => updatePost(pickId, { formats: { ...(pickPost && pickPost.formats || {}), image: !((pickPost && pickPost.formats || {}).image) } }), toggleReels: () => updatePost(pickId, { formats: { ...(pickPost && pickPost.formats || {}), reels: !((pickPost && pickPost.formats || {}).reels) } }), togglePage: () => updatePost(pickId, { destinations: { ...(pickPost && pickPost.destinations || {}), page: !((pickPost && pickPost.destinations || {}).page) } }), toggleGroup: () => updatePost(pickId, { destinations: { ...(pickPost && pickPost.destinations || {}), group: !((pickPost && pickPost.destinations || {}).group) } }), resetAndPick: () => { resetFilters(); setTimeout(() => setPickId(randomDraftId()), 50); }, draftCount: posts.filter(p => (p.status || 'draft') === 'draft').length })}
-      ${AuthModal({ open: showAuth, close: () => { setShowAuth(false); setAuthMsg(''); }, auth, syncStatus, email: authEmail, setEmail: setAuthEmail, msg: authMsg, signIn: startSignIn, signOut: doSignOut, manualSync })}
+      ${AuthModal({ open: showAuth, close: () => { setShowAuth(false); resetAuthStage(); }, auth, syncStatus, email: authEmail, setEmail: setAuthEmail, code: authCode, setCode: setAuthCode, stage: authStage, msg: authMsg, signIn: startSignIn, verify: verifyCode, back: resetAuthStage, signOut: doSignOut, manualSync })}
       ${MergeChoiceModal({ open: !!mergeChoice, choice: mergeChoice, acceptCloud, acceptLocal })}
       ${NewModal({ open: modal === 'new', close: () => setModal(null), form: newForm, setForm: setNewForm, submit: submitNew, defaultsToForm })}
       ${DefaultsModal({ open: modal === 'defaults', close: () => setModal(null), defaults, setDefault, applyToDrafts: applyDefaultsToDrafts })}
@@ -1262,7 +1283,7 @@
   }
 
   // ---------------- Sync modals ----------------
-  function AuthModal({ open, close, auth, syncStatus, email, setEmail, msg, signIn, signOut, manualSync }) {
+  function AuthModal({ open, close, auth, syncStatus, email, setEmail, code, setCode, stage, msg, signIn, verify, back, signOut, manualSync }) {
     if (!open) return null;
     return ModalShell({ open, close, title: 'CLOUD SYNC', maxWidth: 480, children: html`
       <div style="padding: 22px 24px;">
@@ -1288,8 +1309,22 @@
             <button onClick=${signOut} style="padding: 8px 14px; font-size: 12px; font-weight: 600; color: #c44545; background: transparent; border: 1px solid #f5c8c8; border-radius: 5px; cursor: pointer;">Sign out</button>
           </div>
           <div style="font-size: 11px; color: #7a8db0; margin-top: 14px; line-height: 1.5;">Your data syncs to a private Supabase project keyed by your email. To use on another device, install the PWA there and sign in with the same email.</div>
+        ` : stage === 'code' ? html`
+          <div style="font-size: 13px; color: #0d2340; line-height: 1.55; margin-bottom: 6px;">A 6-digit code was sent to:</div>
+          <div style="font-size: 13px; font-weight: 600; color: #0d2340; font-family: 'JetBrains Mono', monospace; margin-bottom: 16px;">${email}</div>
+          <div style="font-size: 12px; color: #7a8db0; line-height: 1.5; margin-bottom: 14px;">Open the email and type the code below. (The clickable link in the email won't work inside an installed PWA on iOS — use the code instead.)</div>
+          <label style="display: block; margin-bottom: 14px;">
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; margin-bottom: 6px;">Code</div>
+            <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" value=${code} onInput=${e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="123456" autoFocus style="width: 100%; padding: 12px 16px; font-size: 22px; letter-spacing: 0.4em; text-align: center; font-weight: 700; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px; font-family: 'JetBrains Mono', monospace;" />
+          </label>
+          ${msg ? html`<div style="font-size: 12px; color: ${msg.startsWith('Error') ? '#c44545' : '#2d7a4a'}; background: ${msg.startsWith('Error') ? '#fdecec' : '#f0f9f3'}; border: 1px solid ${msg.startsWith('Error') ? '#f5c8c8' : '#c5e2d0'}; padding: 10px 12px; border-radius: 5px; margin-bottom: 14px; line-height: 1.5;">${msg}</div>` : null}
+          <div style="display: flex; gap: 8px; justify-content: space-between; align-items: center;">
+            <button onClick=${back} style="padding: 9px 14px; font-size: 12px; font-weight: 600; color: #4a6fa5; background: transparent; border: 1px solid #dde4ef; border-radius: 5px; cursor: pointer;">← Change email</button>
+            <button onClick=${verify} style="padding: 9px 22px; font-size: 12px; font-weight: 700; color: #fff; background: #0d2340; border: none; border-radius: 5px; cursor: pointer; letter-spacing: 0.03em;">Verify &amp; sign in</button>
+          </div>
+          <div style="font-size: 11px; color: #7a8db0; margin-top: 14px; line-height: 1.5;">Didn't get it? Check spam. Or <button onClick=${signIn} style="background: none; border: none; padding: 0; color: #1f5cc7; font-size: 11px; font-weight: 600; cursor: pointer; text-decoration: underline;">send a new code</button> (waits up to ~1 min between sends).</div>
         ` : html`
-          <div style="font-size: 13px; color: #0d2340; line-height: 1.55; margin-bottom: 16px;">Sign in with your email to sync your tracker across devices. We'll send a one-click magic link — no password needed.</div>
+          <div style="font-size: 13px; color: #0d2340; line-height: 1.55; margin-bottom: 16px;">Sign in with your email to sync your tracker across devices. We'll email you a 6-digit code — no password needed.</div>
           <label style="display: block; margin-bottom: 14px;">
             <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; margin-bottom: 6px;">Your email</div>
             <input type="email" value=${email} onInput=${e => setEmail(e.target.value)} placeholder="you@example.com" autoFocus style="width: 100%; padding: 9px 12px; font-size: 13px; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px;" />
@@ -1297,7 +1332,7 @@
           ${msg ? html`<div style="font-size: 12px; color: ${msg.startsWith('Error') ? '#c44545' : '#2d7a4a'}; background: ${msg.startsWith('Error') ? '#fdecec' : '#f0f9f3'}; border: 1px solid ${msg.startsWith('Error') ? '#f5c8c8' : '#c5e2d0'}; padding: 10px 12px; border-radius: 5px; margin-bottom: 14px; line-height: 1.5;">${msg}</div>` : null}
           <div style="display: flex; gap: 8px; justify-content: flex-end;">
             <button onClick=${close} style="padding: 9px 14px; font-size: 12px; font-weight: 600; color: #4a6fa5; background: transparent; border: 1px solid #dde4ef; border-radius: 5px; cursor: pointer;">Cancel</button>
-            <button onClick=${signIn} style="padding: 9px 18px; font-size: 12px; font-weight: 700; color: #fff; background: #0d2340; border: none; border-radius: 5px; cursor: pointer; letter-spacing: 0.03em;">Send magic link</button>
+            <button onClick=${signIn} style="padding: 9px 18px; font-size: 12px; font-weight: 700; color: #fff; background: #0d2340; border: none; border-radius: 5px; cursor: pointer; letter-spacing: 0.03em;">Send code</button>
           </div>
           <div style="font-size: 11px; color: #7a8db0; margin-top: 14px; line-height: 1.5;">Without sync, your data still saves locally on this device. You can also use Backup / Restore to move data manually.</div>
         `}
