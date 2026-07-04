@@ -34,6 +34,7 @@
   const DEFAULTS_KEY = 'psicon_tracker_defaults';
   const VIEWS_KEY = 'psicon_tracker_views';
   const SEED_FLAG_KEY = 'psicon_tracker_seed_loaded';
+  const SEED_VERSION_KEY = 'psicon_tracker_seed_version';
   const linkedKey = (userId) => 'psicon_tracker_linked_' + userId;
 
   // ---------------- Helpers ----------------
@@ -394,14 +395,38 @@
 
 
 
-    // ----- First-load seed (only if no posts yet) -----
+    // ----- First-load / seed-version-bump handling -----
+    //  - If seed.json has version > stored version → TOTAL WIPE: replace local posts with the fresh seed
+    //    and force the next cloud sync to be a PUSH (not a pull), so this rebuild propagates to Supabase.
+    //  - If versions match → normal behavior: seed only when there are no local posts yet.
     useEffect(() => {
-      if (posts.length > 0) return;
       setLoading(true);
       fetch('seed.json')
         .then(r => r.json())
-        .then(seed => {
-          const cleaned = seed.map(migratePost);
+        .then(raw => {
+          const isWrapper = raw && typeof raw === 'object' && !Array.isArray(raw) && Array.isArray(raw.posts);
+          const seedVersion = isWrapper && raw.version ? raw.version : 1;
+          const seedArr = isWrapper ? raw.posts : (Array.isArray(raw) ? raw : []);
+          const storedVersion = parseInt(localStorage.getItem(SEED_VERSION_KEY) || '0', 10);
+
+          if (seedVersion > storedVersion) {
+            // Total wipe. Replace local + prime for push-to-cloud.
+            console.log('Seed v' + seedVersion + ' > stored v' + storedVersion + ' — wiping local posts.');
+            const fresh = seedArr.map(migratePost);
+            setPosts(fresh);
+            setDefaults({});
+            setSavedViews([]);
+            setSelected({}); setPage(0);
+            localStorage.setItem(SEED_VERSION_KEY, String(seedVersion));
+            localStorage.setItem(SEED_FLAG_KEY, '1');
+            // Force any signed-in user to PUSH this fresh set up (skip pull-from-cloud).
+            pullDoneRef.current = true;
+            setLoading(false);
+            return;
+          }
+
+          if (posts.length > 0) { setLoading(false); return; }
+          const cleaned = seedArr.map(migratePost);
           setPosts(cleaned);
           setLoading(false);
         })
@@ -409,6 +434,7 @@
           console.error('seed load failed', err);
           setLoading(false);
         });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     // ----- Derived data -----
