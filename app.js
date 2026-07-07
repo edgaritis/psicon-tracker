@@ -48,6 +48,12 @@
     if (typeof out.formats === 'undefined' || out.formats === null) out.formats = { image: out.format === 'image', reels: out.format === 'reels' };
     if (typeof out.source === 'undefined') out.source = '';
     if (!out.id) out.id = uid();
+    if (typeof out.pinned === 'undefined') out.pinned = false;
+    if (typeof out.starred === 'undefined') out.starred = false;
+    // Strip markdown asterisks from titles (one-time cleanup, safe to re-run).
+    if (typeof out.title === 'string' && /\*/.test(out.title)) {
+      out.title = out.title.replace(/\*+/g, '').replace(/\s+/g, ' ').trim();
+    }
     delete out.published; delete out.destination; delete out.format;
     return out;
   }
@@ -164,7 +170,7 @@
     const [posts, setPosts] = useState(() => (loadJson(STORAGE_KEY, null) || []).map(migratePost));
     const [defaults, setDefaults] = useState(() => loadJson(DEFAULTS_KEY, {}));
     const [savedViews, setSavedViews] = useState(() => loadJson(VIEWS_KEY, []));
-    const [filters, setFilters] = useState({ status: 'all', category: 'all', format: 'all', destination: 'all', dupOnly: false });
+    const [filters, setFilters] = useState({ status: 'all', category: 'all', format: 'all', destination: 'all', dupOnly: false, starredOnly: false, pinnedOnly: false });
     const [search, setSearch] = useState('');
     const [sortBy, setSortBy] = useState('date_desc');
     const [selected, setSelected] = useState({});
@@ -466,6 +472,8 @@
           const k = p.category + '|' + normTitle(p.title);
           if ((dupMap[k] || 0) < 2) return false;
         }
+        if (filters.starredOnly && !p.starred) return false;
+        if (filters.pinnedOnly && !p.pinned) return false;
         if (q) {
           const hay = (p.title + ' ' + (p.category || '') + ' ' + (p.source || '')).toLowerCase();
           if (!hay.includes(q)) return false;
@@ -478,6 +486,8 @@
       else if (sortBy === 'category') out.sort((a, b) => a.category.localeCompare(b.category) || idOrder(b) - idOrder(a));
       else if (sortBy === 'status') out.sort((a, b) => (a.status || 'draft').localeCompare(b.status || 'draft') || idOrder(b) - idOrder(a));
       else if (sortBy === 'source') out.sort((a, b) => (a.source || '').localeCompare(b.source || '') || idOrder(b) - idOrder(a));
+      // Pinned post always floats to the very top, regardless of user sort.
+      out.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
       return out;
     }, [posts, filters, search, sortBy, dupMap]);
 
@@ -516,6 +526,22 @@
       setPosts(curr => curr.map(p => p.id === id ? { ...p, ...patch } : p));
     }, []);
 
+    // Pin: single-select — pinning one auto-unpins any previously pinned post.
+    const togglePin = useCallback((id) => {
+      setPosts(curr => {
+        const isPinned = curr.some(p => p.id === id && p.pinned);
+        return curr.map(p => {
+          if (p.id === id) return { ...p, pinned: !isPinned };
+          if (p.pinned) return { ...p, pinned: false };
+          return p;
+        });
+      });
+    }, []);
+    // Star: multi-select (shortlist).
+    const toggleStar = useCallback((id) => {
+      setPosts(curr => curr.map(p => p.id === id ? { ...p, starred: !p.starred } : p));
+    }, []);
+
     const removePost = useCallback((id) => {
       if (!confirm('Delete this post?')) return;
       setPosts(curr => curr.filter(p => p.id !== id));
@@ -549,7 +575,7 @@
     }, [visible, selected]);
 
     const resetFilters = useCallback(() => {
-      setFilters({ status: 'all', category: 'all', format: 'all', destination: 'all', dupOnly: false });
+      setFilters({ status: 'all', category: 'all', format: 'all', destination: 'all', dupOnly: false, starredOnly: false, pinnedOnly: false });
       setSearch('');
       setSortBy('date_desc');
       setPage(0);
@@ -799,6 +825,8 @@
     }, [modal, search]);
 
     // ----- Render -----
+    const pinnedPost = posts.find(p => p.pinned) || null;
+    const starredCount = posts.filter(p => p.starred).length;
     return html`
       ${PickModal({ open: modal === 'pick', post: pickPost, close: () => setModal(null), publish: () => pickAct('published'), schedule: () => pickAct('scheduled'), reject: () => pickAct('rejected'), skip: pickSkip, toggleImage: () => updatePost(pickId, { formats: { ...(pickPost && pickPost.formats || {}), image: !((pickPost && pickPost.formats || {}).image) } }), toggleReels: () => updatePost(pickId, { formats: { ...(pickPost && pickPost.formats || {}), reels: !((pickPost && pickPost.formats || {}).reels) } }), togglePage: () => updatePost(pickId, { destinations: { ...(pickPost && pickPost.destinations || {}), page: !((pickPost && pickPost.destinations || {}).page) } }), toggleGroup: () => updatePost(pickId, { destinations: { ...(pickPost && pickPost.destinations || {}), group: !((pickPost && pickPost.destinations || {}).group) } }), resetAndPick: () => { resetFilters(); setTimeout(() => setPickId(randomDraftId()), 50); }, draftCount: posts.filter(p => (p.status || 'draft') === 'draft').length })}
       ${AuthModal({ open: showAuth, close: () => { setShowAuth(false); resetAuthStage(); }, auth, syncStatus, email: authEmail, setEmail: setAuthEmail, code: authCode, setCode: setAuthCode, stage: authStage, msg: authMsg, signIn: startSignIn, verify: verifyCode, back: resetAuthStage, signOut: doSignOut, manualSync })}
@@ -881,6 +909,18 @@
           `)}
         </div>
 
+        ${pinnedPost ? html`
+          <div style="display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: #fbf1d8; border: 1px solid #f1dba0; border-left: 4px solid #e8b04a; border-radius: 6px; margin-bottom: 14px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="#c2682a" stroke="#c2682a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700; letter-spacing: 0.12em; color: #9a6d1f; text-transform: uppercase;">Next up</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; color: #c2682a; text-transform: uppercase; letter-spacing: 0.06em;">[${pinnedPost.category}]</span>
+            <span style="font-size: 13px; font-weight: 600; color: #0d2340; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${pinnedPost.title}</span>
+            <button onClick=${() => togglePin(pinnedPost.id)} title="Unpin" style="display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; background: transparent; border: none; border-radius: 4px; cursor: pointer; color: #c2682a;">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+          </div>
+        ` : null}
+
         <!-- Saved views -->
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; padding: 0 4px;">
           <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #7a8db0; text-transform: uppercase; margin-right: 4px;">Views</span>
@@ -916,6 +956,11 @@
           <label style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 11px; font-weight: 600; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px; cursor: pointer;">
             <input type="checkbox" checked=${filters.dupOnly} onChange=${e => { setFilters(f => ({ ...f, dupOnly: e.target.checked })); setPage(0); }} style="cursor: pointer; width: 13px; height: 13px; accent-color: #c2682a;" />
             Duplicates only
+          </label>
+          <label style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 11px; font-weight: 600; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px; cursor: pointer;" title="Show only starred posts">
+            <input type="checkbox" checked=${filters.starredOnly} onChange=${e => { setFilters(f => ({ ...f, starredOnly: e.target.checked })); setPage(0); }} style="cursor: pointer; width: 13px; height: 13px; accent-color: #e8b04a;" />
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="#e8b04a" stroke="#e8b04a" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            Starred (${starredCount})
           </label>
 
           <div style="position: relative; flex: 1; min-width: 220px; max-width: 380px; margin-left: 6px;">
@@ -953,10 +998,11 @@
 
         <!-- Table -->
         <div style="background: #fff; border: 1px solid #dde4ef; border-radius: 0 0 8px 8px; overflow: hidden;">
-          <div class="ct_table_header" style="display: grid; grid-template-columns: 44px 56px 150px minmax(280px, 480px) 110px 150px 220px 50px 1fr; align-items: center; padding: 0 4px; background: #f4f6fa; border-bottom: 1px solid #dde4ef; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; height: 38px;">
+          <div class="ct_table_header" style="display: grid; grid-template-columns: 44px 52px 56px 150px minmax(260px, 460px) 110px 150px 220px 50px 1fr; align-items: center; padding: 0 4px; background: #f4f6fa; border-bottom: 1px solid #dde4ef; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; height: 38px;">
             <div style="display: flex; justify-content: center;">
               <input type="checkbox" checked=${visible.length  > 0 && visible.every(p => selected[p.id])} onChange=${toggleSelectAll} style="cursor: pointer; width: 14px; height: 14px; accent-color: #0d2340;" />
             </div>
+            <div style="padding: 0 4px; text-align: center;" title="Pin (next up) &amp; Star (shortlist)">Mark</div>
             <div style="padding: 0 8px;">#</div>
             <div style="padding: 0 12px;">Category</div>
             <div style="padding: 0 12px;">Title</div>
@@ -975,7 +1021,7 @@
             </div>
           ` : null}
 
-          ${visible.map((p, i) => Row({ p, index: start + i, dupMap, selected, setSelected, updatePost, removePost }))}
+          ${visible.map((p, i) => Row({ p, index: start + i, dupMap, selected, setSelected, updatePost, removePost, togglePin, toggleStar }))}
         </div>
 
         <div class="ct_footer" style="display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 14px; padding: 0 4px; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #4a6fa5; letter-spacing: 0.08em; text-transform: uppercase;">
@@ -1008,7 +1054,7 @@
   }
 
   // ---------------- Row component ----------------
-  function Row({ p, index, dupMap, selected, setSelected, updatePost, removePost }) {
+  function Row({ p, index, dupMap, selected, setSelected, updatePost, removePost, togglePin, toggleStar }) {
     const cat = catColor(p.category);
     const isSel = !!selected[p.id];
     const f = p.formats || {};
@@ -1031,9 +1077,17 @@
     };
 
     return html`
-      <div class=${'row ct_row ' + (isSel ? 'selected' : '')} style="display: grid; grid-template-columns: 44px 56px 150px minmax(280px, 480px) 110px 150px 220px 50px 1fr; align-items: center; padding: 0 4px; border-bottom: 1px solid #eef2f8; min-height: 56px;">
+      <div class=${'row ct_row ' + (isSel ? 'selected' : '')} style="display: grid; grid-template-columns: 44px 52px 56px 150px minmax(260px, 460px) 110px 150px 220px 50px 1fr; align-items: center; padding: 0 4px; border-bottom: 1px solid #eef2f8; min-height: 56px; border-left: ${p.pinned ? '3px solid #e8b04a' : '3px solid transparent'};">
         <div style="display: flex; justify-content: center;">
           <input type="checkbox" checked=${isSel} onChange=${() => setSelected(s => { const c = { ...s }; if (c[p.id]) delete c[p.id]; else c[p.id] = true; return c; })} style="cursor: pointer; width: 14px; height: 14px; accent-color: #0d2340;" />
+        </div>
+        <div style="display: flex; align-items: center; justify-content: center; gap: 2px;">
+          <button onClick=${() => togglePin(p.id)} title="Pin as Next Up (only one)" style="display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; background: transparent; border: none; border-radius: 4px; cursor: pointer; color: ${p.pinned ? '#c2682a' : '#c8d2e3'};">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill=${p.pinned ? '#c2682a' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
+          </button>
+          <button onClick=${() => toggleStar(p.id)} title="Star (shortlist)" style="display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; background: transparent; border: none; border-radius: 4px; cursor: pointer; color: ${p.starred ? '#e8b04a' : '#c8d2e3'};">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill=${p.starred ? '#e8b04a' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+          </button>
         </div>
         <div style="padding: 0 8px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #9bb3d4; font-variant-numeric: tabular-nums;">${String(index + 1).padStart(3, '0')}</div>
         <div style="padding: 0 12px;">
