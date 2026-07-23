@@ -39,16 +39,15 @@
 
   // ---------------- Helpers ----------------
   function normTitle(t) { return (t || '').toLowerCase().replace(/[^a-z0-9áéíóúüñ ]/gi, '').replace(/\s+/g, ' ').trim(); }
-  function statusRank(s) { return { published: 4, scheduled: 3, draft: 2, rejected: 1 }[s || 'draft'] || 0; }
+  function statusRank(s) { return { published: 5, scheduled: 4, next: 3, draft: 2, rejected: 1 }[s || 'draft'] || 0; }
   function uid() { return 'p_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7); }
   function migratePost(p) {
     const out = { ...p };
     if (typeof out.status === 'undefined') out.status = out.published ? 'published' : 'draft';
-    if (typeof out.destinations === 'undefined' || out.destinations === null) out.destinations = { page: out.destination === 'page', group: out.destination === 'group' };
+    if (typeof out.destinations === 'undefined' || out.destinations === null) out.destinations = { page: out.destination === 'page', group: out.destination === 'group', instagram: out.destination === 'instagram' };
     if (typeof out.formats === 'undefined' || out.formats === null) out.formats = { image: out.format === 'image', reels: out.format === 'reels' };
     if (typeof out.source === 'undefined') out.source = '';
     if (!out.id) out.id = uid();
-    if (typeof out.pinned === 'undefined') out.pinned = false;
     if (typeof out.starred === 'undefined') out.starred = false;
     // Strip markdown asterisks from titles (one-time cleanup, safe to re-run).
     if (typeof out.title === 'string' && /\*/.test(out.title)) {
@@ -152,12 +151,13 @@
       if (arr.length === 1) { result.push(arr[0]); continue; }
       mergedGroups++; removed += arr.length - 1;
       const winner = arr.slice().sort((a, b) => statusRank(b.status) - statusRank(a.status) || String(a.id).localeCompare(String(b.id)))[0];
-      const f = { image: false, reels: false }, d = { page: false, group: false }, sources = new Set();
+      const f = { image: false, reels: false }, d = { page: false, group: false, instagram: false }, sources = new Set();
       for (const p of arr) {
         if ((p.formats || {}).image) f.image = true;
         if ((p.formats || {}).reels) f.reels = true;
         if ((p.destinations || {}).page) d.page = true;
         if ((p.destinations || {}).group) d.group = true;
+        if ((p.destinations || {}).instagram) d.instagram = true;
         if (p.source) sources.add(p.source);
       }
       result.push({ ...winner, formats: f, destinations: d, source: Array.from(sources).join(' + ') });
@@ -170,7 +170,7 @@
     const [posts, setPosts] = useState(() => (loadJson(STORAGE_KEY, null) || []).map(migratePost));
     const [defaults, setDefaults] = useState(() => loadJson(DEFAULTS_KEY, {}));
     const [savedViews, setSavedViews] = useState(() => loadJson(VIEWS_KEY, []));
-    const [filters, setFilters] = useState({ status: 'all', category: 'all', format: 'all', destination: 'all', dupOnly: false, starredOnly: false, pinnedOnly: false });
+    const [filters, setFilters] = useState({ status: 'all', category: 'all', format: 'all', destination: 'all', dupOnly: false, starredOnly: false });
     const [search, setSearch] = useState('');
     const [sortBy, setSortBy] = useState('date_desc');
     const [selected, setSelected] = useState({});
@@ -179,7 +179,7 @@
     const [loading, setLoading] = useState(false);
     const [modal, setModal] = useState(null); // 'pick' | 'new' | 'defaults' | 'saveView' | 'help' | 'importMd' | null
     const [pickId, setPickId] = useState(null);
-    const [newForm, setNewForm] = useState({ category: '3points', title: '', image: true, reels: false, page: true, group: false });
+    const [newForm, setNewForm] = useState({ category: '3points', title: '', image: true, reels: false, page: true, group: false, instagram: false });
     const [viewName, setViewName] = useState('');
     const [mdPreview, setMdPreview] = useState(null);
     const [dragActive, setDragActive] = useState(false);
@@ -466,14 +466,14 @@
         const d = p.destinations || {};
         if (filters.destination === 'page' && !d.page) return false;
         if (filters.destination === 'group' && !d.group) return false;
+        if (filters.destination === 'instagram' && !d.instagram) return false;
         if (filters.destination === 'both' && !(d.page && d.group)) return false;
-        if (filters.destination === 'none' && (d.page || d.group)) return false;
+        if (filters.destination === 'none' && (d.page || d.group || d.instagram)) return false;
         if (filters.dupOnly) {
           const k = p.category + '|' + normTitle(p.title);
           if ((dupMap[k] || 0) < 2) return false;
         }
         if (filters.starredOnly && !p.starred) return false;
-        if (filters.pinnedOnly && !p.pinned) return false;
         if (q) {
           const hay = (p.title + ' ' + (p.category || '') + ' ' + (p.source || '')).toLowerCase();
           if (!hay.includes(q)) return false;
@@ -486,8 +486,6 @@
       else if (sortBy === 'category') out.sort((a, b) => a.category.localeCompare(b.category) || idOrder(b) - idOrder(a));
       else if (sortBy === 'status') out.sort((a, b) => (a.status || 'draft').localeCompare(b.status || 'draft') || idOrder(b) - idOrder(a));
       else if (sortBy === 'source') out.sort((a, b) => (a.source || '').localeCompare(b.source || '') || idOrder(b) - idOrder(a));
-      // Pinned post always floats to the very top, regardless of user sort.
-      out.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
       return out;
     }, [posts, filters, search, sortBy, dupMap]);
 
@@ -506,8 +504,11 @@
       const reelsCount = posts.filter(p => (p.formats || {}).reels).length;
       const pageCount = posts.filter(p => (p.destinations || {}).page).length;
       const groupCount = posts.filter(p => (p.destinations || {}).group).length;
+      const nextCount = posts.filter(p => (p.status || 'draft') === 'next').length;
+      const instaCount = posts.filter(p => (p.destinations || {}).instagram).length;
       return [
         { label: 'Total',     value: total,       unit: 'posts',  color: '#0d2340' },
+        { label: 'Next',      value: nextCount,   unit: 'to do',  color: '#d15a2b' },
         { label: 'Drafts',    value: drafts,      unit: 'todo',   color: '#5a6470' },
         { label: 'Scheduled', value: scheduled,   unit: 'queue',  color: '#9a6d1f' },
         { label: 'Published', value: published,   unit: 'live',   color: '#2d7a4a' },
@@ -516,6 +517,7 @@
         { label: 'Reels',     value: reelsCount,  unit: 'video',  color: '#7a3fbf' },
         { label: 'For Page',  value: pageCount,   unit: 'fb pg',  color: '#1f5cc7' },
         { label: 'For Group', value: groupCount,  unit: 'fb gp',  color: '#c97a3f' },
+        { label: 'Instagram', value: instaCount,  unit: 'ig',     color: '#c13584' },
       ];
     }, [posts]);
 
@@ -526,18 +528,8 @@
       setPosts(curr => curr.map(p => p.id === id ? { ...p, ...patch } : p));
     }, []);
 
-    // Pin: single-select — pinning one auto-unpins any previously pinned post.
-    const togglePin = useCallback((id) => {
-      setPosts(curr => {
-        const isPinned = curr.some(p => p.id === id && p.pinned);
-        return curr.map(p => {
-          if (p.id === id) return { ...p, pinned: !isPinned };
-          if (p.pinned) return { ...p, pinned: false };
-          return p;
-        });
-      });
-    }, []);
-    // Star: multi-select (shortlist).
+    // Pin removed — Star is now the multi-select Featured marker.
+    // Star: multi-select (featured).
     const toggleStar = useCallback((id) => {
       setPosts(curr => curr.map(p => p.id === id ? { ...p, starred: !p.starred } : p));
     }, []);
@@ -575,7 +567,7 @@
     }, [visible, selected]);
 
     const resetFilters = useCallback(() => {
-      setFilters({ status: 'all', category: 'all', format: 'all', destination: 'all', dupOnly: false, starredOnly: false, pinnedOnly: false });
+      setFilters({ status: 'all', category: 'all', format: 'all', destination: 'all', dupOnly: false, starredOnly: false });
       setSearch('');
       setSortBy('date_desc');
       setPage(0);
@@ -624,10 +616,11 @@
         reels: formats ? !!formats.reels : (prev ? prev.reels : false),
         page:  d.page  !== undefined ? !!d.page  : (prev ? prev.page  : true),
         group: d.group !== undefined ? !!d.group : (prev ? prev.group : false),
+        instagram: d.instagram !== undefined ? !!d.instagram : (prev ? prev.instagram : false),
       };
     };
     const openNew = () => {
-      const seeded = defaultsToForm('3points', { category: '3points', title: '', image: true, reels: false, page: true, group: false });
+      const seeded = defaultsToForm('3points', { category: '3points', title: '', image: true, reels: false, page: true, group: false, instagram: false });
       setNewForm({ ...seeded, title: '' });
       setModal('new');
       setTimeout(() => { const el = document.getElementById('ct_new_title'); if (el) el.focus(); }, 30);
@@ -640,7 +633,7 @@
         category: newForm.category,
         title: t,
         formats: { image: !!newForm.image, reels: !!newForm.reels },
-        destinations: { page: !!newForm.page, group: !!newForm.group },
+        destinations: { page: !!newForm.page, group: !!newForm.group, instagram: !!newForm.instagram },
         status: 'draft',
         source: 'manual',
       };
@@ -685,7 +678,7 @@
         return {
           ...p,
           formats: { image: !!formats.image, reels: !!formats.reels },
-          destinations: { page: !!d.page, group: !!d.group },
+          destinations: { page: !!d.page, group: !!d.group, instagram: !!d.instagram },
         };
       });
       if (count === 0) { alert('No drafts matched any category with defaults set.'); return; }
@@ -792,7 +785,7 @@
           category: s.category,
           title: s.title,
           formats: { image: !!formats.image, reels: !!formats.reels },
-          destinations: { page: !!d.page, group: !!d.group },
+          destinations: { page: !!d.page, group: !!d.group, instagram: !!d.instagram },
           status: 'draft',
           source: s.source,
         };
@@ -825,10 +818,10 @@
     }, [modal, search]);
 
     // ----- Render -----
-    const pinnedPost = posts.find(p => p.pinned) || null;
+    const pinnedPost = null;
     const starredCount = posts.filter(p => p.starred).length;
     return html`
-      ${PickModal({ open: modal === 'pick', post: pickPost, close: () => setModal(null), publish: () => pickAct('published'), schedule: () => pickAct('scheduled'), reject: () => pickAct('rejected'), skip: pickSkip, toggleImage: () => updatePost(pickId, { formats: { ...(pickPost && pickPost.formats || {}), image: !((pickPost && pickPost.formats || {}).image) } }), toggleReels: () => updatePost(pickId, { formats: { ...(pickPost && pickPost.formats || {}), reels: !((pickPost && pickPost.formats || {}).reels) } }), togglePage: () => updatePost(pickId, { destinations: { ...(pickPost && pickPost.destinations || {}), page: !((pickPost && pickPost.destinations || {}).page) } }), toggleGroup: () => updatePost(pickId, { destinations: { ...(pickPost && pickPost.destinations || {}), group: !((pickPost && pickPost.destinations || {}).group) } }), resetAndPick: () => { resetFilters(); setTimeout(() => setPickId(randomDraftId()), 50); }, draftCount: posts.filter(p => (p.status || 'draft') === 'draft').length })}
+      ${PickModal({ open: modal === 'pick', post: pickPost, close: () => setModal(null), publish: () => pickAct('published'), schedule: () => pickAct('scheduled'), reject: () => pickAct('rejected'), skip: pickSkip, toggleImage: () => updatePost(pickId, { formats: { ...(pickPost && pickPost.formats || {}), image: !((pickPost && pickPost.formats || {}).image) } }), toggleReels: () => updatePost(pickId, { formats: { ...(pickPost && pickPost.formats || {}), reels: !((pickPost && pickPost.formats || {}).reels) } }), togglePage: () => updatePost(pickId, { destinations: { ...(pickPost && pickPost.destinations || {}), page: !((pickPost && pickPost.destinations || {}).page) } }), toggleGroup: () => updatePost(pickId, { destinations: { ...(pickPost && pickPost.destinations || {}), group: !((pickPost && pickPost.destinations || {}).group) } }), toggleInstagram: () => updatePost(pickId, { destinations: { ...(pickPost && pickPost.destinations || {}), instagram: !((pickPost && pickPost.destinations || {}).instagram) } }), resetAndPick: () => { resetFilters(); setTimeout(() => setPickId(randomDraftId()), 50); }, draftCount: posts.filter(p => (p.status || 'draft') === 'draft').length })}
       ${AuthModal({ open: showAuth, close: () => { setShowAuth(false); resetAuthStage(); }, auth, syncStatus, email: authEmail, setEmail: setAuthEmail, code: authCode, setCode: setAuthCode, stage: authStage, msg: authMsg, signIn: startSignIn, verify: verifyCode, back: resetAuthStage, signOut: doSignOut, manualSync })}
       ${MergeChoiceModal({ open: !!mergeChoice, choice: mergeChoice, acceptCloud, acceptLocal })}
       ${NewModal({ open: modal === 'new', close: () => setModal(null), form: newForm, setForm: setNewForm, submit: submitNew, defaultsToForm })}
@@ -897,7 +890,7 @@
         </div>
 
         <!-- Stats -->
-        <div class="ct_stats" style="display: grid; grid-template-columns: repeat(9, 1fr); gap: 1px; background: #dde4ef; border: 1px solid #dde4ef; border-radius: 8px; overflow: hidden; margin-bottom: 22px;">
+        <div class="ct_stats" style="display: grid; grid-template-columns: repeat(11, 1fr); gap: 1px; background: #dde4ef; border: 1px solid #dde4ef; border-radius: 8px; overflow: hidden; margin-bottom: 22px;">
           ${stats.map(s => html`
             <div style="background: #fff; padding: 14px 16px;">
               <div style="font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #7a8db0; text-transform: uppercase; margin-bottom: 6px;">${s.label}</div>
@@ -908,18 +901,6 @@
             </div>
           `)}
         </div>
-
-        ${pinnedPost ? html`
-          <div style="display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: #fbf1d8; border: 1px solid #f1dba0; border-left: 4px solid #e8b04a; border-radius: 6px; margin-bottom: 14px;">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="#c2682a" stroke="#c2682a" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
-            <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700; letter-spacing: 0.12em; color: #9a6d1f; text-transform: uppercase;">Next up</span>
-            <span style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; color: #c2682a; text-transform: uppercase; letter-spacing: 0.06em;">[${pinnedPost.category}]</span>
-            <span style="font-size: 13px; font-weight: 600; color: #0d2340; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${pinnedPost.title}</span>
-            <button onClick=${() => togglePin(pinnedPost.id)} title="Unpin" style="display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; background: transparent; border: none; border-radius: 4px; cursor: pointer; color: #c2682a;">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
-            </button>
-          </div>
-        ` : null}
 
         <!-- Saved views -->
         <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; padding: 0 4px;">
@@ -941,7 +922,7 @@
           </div>
 
           <select value=${filters.status} onChange=${e => { setFilters(f => ({ ...f, status: e.target.value })); setPage(0); }} style="padding: 6px 10px; font-size: 12px; font-weight: 500; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px;">
-            <option value="all">All status</option><option value="draft">Draft</option><option value="scheduled">Scheduled</option><option value="published">Published</option><option value="rejected">Rejected</option>
+            <option value="all">All status</option><option value="next">Next</option><option value="draft">Draft</option><option value="scheduled">Scheduled</option><option value="published">Published</option><option value="rejected">Rejected</option>
           </select>
           <select value=${filters.category} onChange=${e => { setFilters(f => ({ ...f, category: e.target.value })); setPage(0); }} style="padding: 6px 10px; font-size: 12px; font-weight: 500; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px;">
             <option value="all">All categories</option>
@@ -960,7 +941,7 @@
           <label style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 11px; font-weight: 600; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px; cursor: pointer;" title="Show only starred posts">
             <input type="checkbox" checked=${filters.starredOnly} onChange=${e => { setFilters(f => ({ ...f, starredOnly: e.target.checked })); setPage(0); }} style="cursor: pointer; width: 13px; height: 13px; accent-color: #e8b04a;" />
             <svg width="12" height="12" viewBox="0 0 24 24" fill="#e8b04a" stroke="#e8b04a" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-            Starred (${starredCount})
+            Featured (${starredCount})
           </label>
 
           <div style="position: relative; flex: 1; min-width: 220px; max-width: 380px; margin-left: 6px;">
@@ -980,6 +961,7 @@
           <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; background: #0d2340; color: #fff; border-left: 1px solid #0d2340; border-right: 1px solid #0d2340;">
             <div style="font-size: 12px; font-weight: 600;"><span style="color: #e8b04a;">${selectedIds.length}</span> selected</div>
             <div style="height: 16px; width: 1px; background: #4a6fa5;"></div>
+            <button onClick=${() => bulkUpdate(p => ({ ...p, status: 'next' }))} style="padding: 5px 12px; font-size: 11px; font-weight: 700; color: #fff; background: #e8734a; border: none; border-radius: 4px; cursor: pointer; letter-spacing: 0.04em;">MARK NEXT</button>
             <button onClick=${() => bulkUpdate(p => ({ ...p, status: 'published' }))} style="padding: 5px 12px; font-size: 11px; font-weight: 700; color: #0d2340; background: #7dd3a4; border: none; border-radius: 4px; cursor: pointer; letter-spacing: 0.04em;">MARK PUBLISHED</button>
             <button onClick=${() => bulkUpdate(p => ({ ...p, status: 'scheduled' }))} style="padding: 5px 12px; font-size: 11px; font-weight: 700; color: #0d2340; background: #e8b04a; border: none; border-radius: 4px; cursor: pointer; letter-spacing: 0.04em;">MARK SCHEDULED</button>
             <button onClick=${() => bulkUpdate(p => ({ ...p, status: 'rejected' }))} style="padding: 5px 12px; font-size: 11px; font-weight: 700; color: #fff; background: #c44545; border: none; border-radius: 4px; cursor: pointer; letter-spacing: 0.04em;">MARK REJECTED</button>
@@ -987,6 +969,7 @@
             <div style="height: 16px; width: 1px; background: #4a6fa5;"></div>
             <button onClick=${() => bulkUpdate(p => ({ ...p, destinations: { ...(p.destinations || {}), page: true } }))} style="padding: 5px 10px; font-size: 11px; font-weight: 600; color: #fff; background: transparent; border: 1px solid #4a6fa5; border-radius: 4px; cursor: pointer; letter-spacing: 0.04em;">+ Page</button>
             <button onClick=${() => bulkUpdate(p => ({ ...p, destinations: { ...(p.destinations || {}), group: true } }))} style="padding: 5px 10px; font-size: 11px; font-weight: 600; color: #fff; background: transparent; border: 1px solid #4a6fa5; border-radius: 4px; cursor: pointer; letter-spacing: 0.04em;">+ Group</button>
+            <button onClick=${() => bulkUpdate(p => ({ ...p, destinations: { ...(p.destinations || {}), instagram: true } }))} style="padding: 5px 10px; font-size: 11px; font-weight: 600; color: #fff; background: transparent; border: 1px solid #4a6fa5; border-radius: 4px; cursor: pointer; letter-spacing: 0.04em;">+ Insta</button>
             <button onClick=${() => bulkUpdate(p => ({ ...p, formats: { ...(p.formats || {}), image: true } }))} style="padding: 5px 10px; font-size: 11px; font-weight: 600; color: #fff; background: transparent; border: 1px solid #4a6fa5; border-radius: 4px; cursor: pointer; letter-spacing: 0.04em;">+ Image</button>
             <button onClick=${() => bulkUpdate(p => ({ ...p, formats: { ...(p.formats || {}), reels: true } }))} style="padding: 5px 10px; font-size: 11px; font-weight: 600; color: #fff; background: transparent; border: 1px solid #4a6fa5; border-radius: 4px; cursor: pointer; letter-spacing: 0.04em;">+ Reels</button>
             <div style="height: 16px; width: 1px; background: #4a6fa5;"></div>
@@ -998,11 +981,11 @@
 
         <!-- Table -->
         <div style="background: #fff; border: 1px solid #dde4ef; border-radius: 0 0 8px 8px; overflow: hidden;">
-          <div class="ct_table_header" style="display: grid; grid-template-columns: 44px 52px 56px 150px minmax(260px, 460px) 110px 150px 220px 50px 1fr; align-items: center; padding: 0 4px; background: #f4f6fa; border-bottom: 1px solid #dde4ef; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; height: 38px;">
+          <div class="ct_table_header" style="display: grid; grid-template-columns: 44px 40px 56px 150px minmax(240px, 440px) 110px 160px 250px 50px 1fr; align-items: center; padding: 0 4px; background: #f4f6fa; border-bottom: 1px solid #dde4ef; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; height: 38px;">
             <div style="display: flex; justify-content: center;">
               <input type="checkbox" checked=${visible.length  > 0 && visible.every(p => selected[p.id])} onChange=${toggleSelectAll} style="cursor: pointer; width: 14px; height: 14px; accent-color: #0d2340;" />
             </div>
-            <div style="padding: 0 4px; text-align: center;" title="Pin (next up) &amp; Star (shortlist)">Mark</div>
+            <div style="padding: 0 2px; text-align: center;" title="Featured post">Feat</div>
             <div style="padding: 0 8px;">#</div>
             <div style="padding: 0 12px;">Category</div>
             <div style="padding: 0 12px;">Title</div>
@@ -1021,7 +1004,7 @@
             </div>
           ` : null}
 
-          ${visible.map((p, i) => Row({ p, index: start + i, dupMap, selected, setSelected, updatePost, removePost, togglePin, toggleStar }))}
+          ${visible.map((p, i) => Row({ p, index: start + i, dupMap, selected, setSelected, updatePost, removePost, toggleStar }))}
         </div>
 
         <div class="ct_footer" style="display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 14px; padding: 0 4px; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #4a6fa5; letter-spacing: 0.08em; text-transform: uppercase;">
@@ -1054,7 +1037,7 @@
   }
 
   // ---------------- Row component ----------------
-  function Row({ p, index, dupMap, selected, setSelected, updatePost, removePost, togglePin, toggleStar }) {
+  function Row({ p, index, dupMap, selected, setSelected, updatePost, removePost, toggleStar }) {
     const cat = catColor(p.category);
     const isSel = !!selected[p.id];
     const f = p.formats || {};
@@ -1065,10 +1048,10 @@
     const isDup = dupCount > 1;
 
     const stCls = (st) => ({
-      fg: status === st ? (st === 'rejected' ? '#fff' : (st === 'draft' ? '#fff' : '#0d2340')) : '#7a8db0',
-      bg: status === st ? ({ draft: '#5a6470', scheduled: '#e8b04a', published: '#7dd3a4', rejected: '#c44545' }[st]) : 'transparent',
+      fg: status === st ? ((st === 'rejected' || st === 'draft' || st === 'next') ? '#fff' : '#0d2340') : '#7a8db0',
+      bg: status === st ? ({ next: '#e8734a', draft: '#5a6470', scheduled: '#e8b04a', published: '#7dd3a4', rejected: '#c44545' }[st]) : 'transparent',
     });
-    const sDraft = stCls('draft'), sSched = stCls('scheduled'), sPub = stCls('published'), sRej = stCls('rejected');
+    const sNext = stCls('next'), sDraft = stCls('draft'), sSched = stCls('scheduled'), sPub = stCls('published'), sRej = stCls('rejected');
 
     const titleRef = useRef(null);
     const onBlur = (e) => {
@@ -1077,16 +1060,13 @@
     };
 
     return html`
-      <div class=${'row ct_row ' + (isSel ? 'selected' : '')} style="display: grid; grid-template-columns: 44px 52px 56px 150px minmax(260px, 460px) 110px 150px 220px 50px 1fr; align-items: center; padding: 0 4px; border-bottom: 1px solid #eef2f8; min-height: 56px; border-left: ${p.pinned ? '3px solid #e8b04a' : '3px solid transparent'};">
+      <div class=${'row ct_row ' + (isSel ? 'selected' : '')} style="display: grid; grid-template-columns: 44px 40px 56px 150px minmax(240px, 440px) 110px 160px 250px 50px 1fr; align-items: center; padding: 0 4px; border-bottom: 1px solid #eef2f8; min-height: 84px; background: ${(index % 2 === 0) ? '#ffffff' : '#f6f8fc'};">
         <div style="display: flex; justify-content: center;">
           <input type="checkbox" checked=${isSel} onChange=${() => setSelected(s => { const c = { ...s }; if (c[p.id]) delete c[p.id]; else c[p.id] = true; return c; })} style="cursor: pointer; width: 14px; height: 14px; accent-color: #0d2340;" />
         </div>
-        <div style="display: flex; align-items: center; justify-content: center; gap: 2px;">
-          <button onClick=${() => togglePin(p.id)} title="Pin as Next Up (only one)" style="display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; background: transparent; border: none; border-radius: 4px; cursor: pointer; color: ${p.pinned ? '#c2682a' : '#c8d2e3'};">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill=${p.pinned ? '#c2682a' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
-          </button>
-          <button onClick=${() => toggleStar(p.id)} title="Star (shortlist)" style="display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; background: transparent; border: none; border-radius: 4px; cursor: pointer; color: ${p.starred ? '#e8b04a' : '#c8d2e3'};">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill=${p.starred ? '#e8b04a' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        <div style="display: flex; align-items: center; justify-content: center;">
+          <button onClick=${() => toggleStar(p.id)} title="Featured post" style="display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; background: transparent; border: none; border-radius: 4px; cursor: pointer; color: ${p.starred ? '#e8b04a' : '#c8d2e3'};">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill=${p.starred ? '#e8b04a' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
           </button>
         </div>
         <div style="padding: 0 8px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #9bb3d4; font-variant-numeric: tabular-nums;">${String(index + 1).padStart(3, '0')}</div>
@@ -1113,7 +1093,7 @@
             REELS
           </label>
         </div>
-        <div style="display: flex; flex-direction: column; gap: 4px; padding: 0 12px;">
+        <div style="display: flex; flex-direction: column; gap: 5px; padding: 0 12px;">
           <label style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 11px; font-weight: 600; color: ${d.page ? '#1f5cc7' : '#9aa6b8'}; background: ${d.page ? '#e8f0fc' : '#f7f9fc'}; border: 1px solid ${d.page ? '#c8dcf7' : '#e3e8ef'}; border-radius: 4px; cursor: pointer; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.04em;">
             <input type="checkbox" checked=${!!d.page} onChange=${() => updatePost(p.id, { destinations: { ...d, page: !d.page } })} style="cursor: pointer; width: 12px; height: 12px; accent-color: #1f5cc7; margin: 0;" />
             FB Page
@@ -1122,13 +1102,18 @@
             <input type="checkbox" checked=${!!d.group} onChange=${() => updatePost(p.id, { destinations: { ...d, group: !d.group } })} style="cursor: pointer; width: 12px; height: 12px; accent-color: #c97a3f; margin: 0;" />
             FB Group
           </label>
+          <label style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 11px; font-weight: 600; color: ${d.instagram ? '#c13584' : '#9aa6b8'}; background: ${d.instagram ? '#fbe6f2' : '#f7f9fc'}; border: 1px solid ${d.instagram ? '#f0c4dd' : '#e3e8ef'}; border-radius: 4px; cursor: pointer; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.04em;">
+            <input type="checkbox" checked=${!!d.instagram} onChange=${() => updatePost(p.id, { destinations: { ...d, instagram: !d.instagram } })} style="cursor: pointer; width: 12px; height: 12px; accent-color: #c13584; margin: 0;" />
+            Instagram
+          </label>
         </div>
         <div style="padding: 0 8px;">
           <div style="display: inline-flex; padding: 2px; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px; gap: 1px;">
-            <button onClick=${() => updatePost(p.id, { status: 'draft' })} style="padding: 4px 8px; font-size: 10px; font-weight: 700; color: ${sDraft.fg}; background: ${sDraft.bg}; border: none; border-radius: 3px; cursor: pointer; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace;">DRAFT</button>
-            <button onClick=${() => updatePost(p.id, { status: 'scheduled' })} style="padding: 4px 8px; font-size: 10px; font-weight: 700; color: ${sSched.fg}; background: ${sSched.bg}; border: none; border-radius: 3px; cursor: pointer; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace;">SCHED</button>
-            <button onClick=${() => updatePost(p.id, { status: 'published' })} style="padding: 4px 8px; font-size: 10px; font-weight: 700; color: ${sPub.fg}; background: ${sPub.bg}; border: none; border-radius: 3px; cursor: pointer; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace;">PUB</button>
-            <button onClick=${() => updatePost(p.id, { status: 'rejected' })} style="padding: 4px 8px; font-size: 10px; font-weight: 700; color: ${sRej.fg}; background: ${sRej.bg}; border: none; border-radius: 3px; cursor: pointer; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace;">REJ</button>
+            <button onClick=${() => updatePost(p.id, { status: 'next' })} style="padding: 4px 7px; font-size: 10px; font-weight: 700; color: ${sNext.fg}; background: ${sNext.bg}; border: none; border-radius: 3px; cursor: pointer; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace;">NEXT</button>
+            <button onClick=${() => updatePost(p.id, { status: 'draft' })} style="padding: 4px 7px; font-size: 10px; font-weight: 700; color: ${sDraft.fg}; background: ${sDraft.bg}; border: none; border-radius: 3px; cursor: pointer; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace;">DRAFT</button>
+            <button onClick=${() => updatePost(p.id, { status: 'scheduled' })} style="padding: 4px 7px; font-size: 10px; font-weight: 700; color: ${sSched.fg}; background: ${sSched.bg}; border: none; border-radius: 3px; cursor: pointer; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace;">SCHED</button>
+            <button onClick=${() => updatePost(p.id, { status: 'published' })} style="padding: 4px 7px; font-size: 10px; font-weight: 700; color: ${sPub.fg}; background: ${sPub.bg}; border: none; border-radius: 3px; cursor: pointer; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace;">PUB</button>
+            <button onClick=${() => updatePost(p.id, { status: 'rejected' })} style="padding: 4px 7px; font-size: 10px; font-weight: 700; color: ${sRej.fg}; background: ${sRej.bg}; border: none; border-radius: 3px; cursor: pointer; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace;">REJ</button>
           </div>
         </div>
         <div style="display: flex; justify-content: center;">
@@ -1157,7 +1142,7 @@
     `;
   }
 
-  function PickModal({ open, post, close, publish, schedule, reject, skip, toggleImage, toggleReels, togglePage, toggleGroup, resetAndPick, draftCount }) {
+  function PickModal({ open, post, close, publish, schedule, reject, skip, toggleImage, toggleReels, togglePage, toggleGroup, toggleInstagram, resetAndPick, draftCount }) {
     if (!open) return null;
     return ModalShell({ open, close, maxWidth: 640, title: html`PICK A DRAFT <span style="color: #9bb3d4; font-family: 'JetBrains Mono', monospace; font-weight: 400; margin-left: 8px;">${draftCount} drafts</span>`, children: !post ? html`
       <div style="padding: 50px 28px; text-align: center;">
@@ -1204,6 +1189,10 @@
                 <label style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 12px; font-weight: 600; color: ${d.group ? '#9a6d1f' : '#9aa6b8'}; background: ${d.group ? '#fbf1d8' : '#f7f9fc'}; border: 1px solid ${d.group ? '#f1dba0' : '#e3e8ef'}; border-radius: 4px; cursor: pointer; font-family: 'JetBrains Mono', monospace;">
                   <input type="checkbox" checked=${!!d.group} onChange=${toggleGroup} style="width: 13px; height: 13px; accent-color: #c97a3f; margin: 0;" />
                   FB Group
+                </label>
+                <label style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 12px; font-weight: 600; color: ${d.instagram ? '#c13584' : '#9aa6b8'}; background: ${d.instagram ? '#fbe6f2' : '#f7f9fc'}; border: 1px solid ${d.instagram ? '#f0c4dd' : '#e3e8ef'}; border-radius: 4px; cursor: pointer; font-family: 'JetBrains Mono', monospace;">
+                  <input type="checkbox" checked=${!!d.instagram} onChange=${toggleInstagram} style="width: 13px; height: 13px; accent-color: #c13584; margin: 0;" />
+                  Instagram
                 </label>
               </div>
             </div>
@@ -1260,6 +1249,10 @@
                 <input type="checkbox" checked=${form.group} onChange=${e => setForm({ ...form, group: e.target.checked })} style="width: 13px; height: 13px; accent-color: #c97a3f; margin: 0;" />
                 FB Group
               </label>
+              <label style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 12px; font-weight: 600; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 4px; cursor: pointer; font-family: 'JetBrains Mono', monospace;">
+                <input type="checkbox" checked=${form.instagram} onChange=${e => setForm({ ...form, instagram: e.target.checked })} style="width: 13px; height: 13px; accent-color: #c13584; margin: 0;" />
+                Instagram
+              </label>
             </div>
           </div>
         </div>
@@ -1308,6 +1301,10 @@
                 <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: #0d2340; cursor: pointer;">
                   <input type="checkbox" checked=${!!raw.group} onChange=${e => setDefault(cat, { group: e.target.checked })} style="width: 13px; height: 13px; accent-color: #c97a3f; margin: 0;" >
                   Group
+                </label>
+                <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: #0d2340; cursor: pointer;">
+                  <input type="checkbox" checked=${!!raw.instagram} onChange=${e => setDefault(cat, { instagram: e.target.checked })} style="width: 13px; height: 13px; accent-color: #c13584; margin: 0;" >
+                  Insta
                 </label>
               </div>
             </div>
