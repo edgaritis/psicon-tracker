@@ -179,6 +179,7 @@
     const [loading, setLoading] = useState(false);
     const [modal, setModal] = useState(null); // 'pick' | 'new' | 'defaults' | 'saveView' | 'help' | 'importMd' | null
     const [pickId, setPickId] = useState(null);
+    const [detailId, setDetailId] = useState(null);
     const [newForm, setNewForm] = useState({ category: '3points', title: '', image: true, reels: false, page: true, group: false, instagram: false });
     const [viewName, setViewName] = useState('');
     const [mdPreview, setMdPreview] = useState(null);
@@ -195,6 +196,8 @@
     const [mergeChoice, setMergeChoice] = useState(null);
     const pullDoneRef = useRef(false);
     const pushTimerRef = useRef(null);
+    const enrichDoneRef = useRef(false);
+    const [contentMap, setContentMap] = useState(null);
 
     // ----- Persistence -----
     useEffect(() => { saveJson(STORAGE_KEY, posts); }, [posts]);
@@ -442,6 +445,82 @@
         });
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // ----- Content join: load static content.json into an in-memory map -----
+    //  Content (body/caption/closer/prompt) is NOT stored in posts (too large for localStorage
+    //  and would bloat cloud sync). It lives in the shipped content.json and is joined to posts
+    //  at render time by (category | normalized title), with body-first-line fallback.
+    useEffect(() => {
+      fetch('content.json')
+        .then(r => r.json())
+        .then(data => {
+          const map = {};
+          const put = (k, c) => { if (k && !(k in map)) map[k] = c; };
+          for (const c of (data && data.posts) || []) {
+            if (c.title) put(c.category + '|' + normTitle(c.title), c);
+            if (c.body) { put(c.category + '|' + normTitle(c.body.split('\n')[0]), c); put(c.category + '|' + normTitle(c.body), c); }
+          }
+          setContentMap(map);
+        })
+        .catch(err => console.error('content.json load failed', err));
+    }, []);
+
+    // ----- One-time: add unmatched content records as lightweight draft rows -----
+    //  Only ADDS the ~450 posts that aren't already in the list; stores NO body (comes from the
+    //  content map). Flag-gated; waits for the cloud pull for signed-in users so the auto-push
+    //  propagates the additions up.
+    useEffect(() => {
+      if (enrichDoneRef.current) return;
+      if (!posts.length || !contentMap) return;
+      const flagKey = 'psicon_tracker_content_v2';
+      try { if (localStorage.getItem(flagKey)) { enrichDoneRef.current = true; return; } } catch (e) { return; }
+      const ready = auth.status === 'signedIn' ? pullDoneRef.current : true;
+      if (!ready) return;
+      enrichDoneRef.current = true;
+      fetch('content.json')
+        .then(r => r.json())
+        .then(data => {
+          const content = (data && data.posts) || [];
+          if (!content.length) return;
+          const next = posts.slice();
+          const have = new Set();
+          const addKey = (k) => { if (k) have.add(k); };
+          next.forEach(p => { addKey(p.category + '|' + normTitle(p.title)); });
+          const cid = (c) => {
+            const s = c.category + '|' + normTitle(c.title) + '|' + (c.body || '').slice(0, 60);
+            let h = 0; for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; }
+            return 'c_' + (h >>> 0).toString(36);
+          };
+          let added = 0;
+          const usedIds = new Set(next.map(p => p.id));
+          for (const c of content) {
+            const ks = [];
+            if (c.title) ks.push(c.category + '|' + normTitle(c.title));
+            if (c.body) { ks.push(c.category + '|' + normTitle(c.body.split('\n')[0])); ks.push(c.category + '|' + normTitle(c.body)); }
+            if (ks.some(k => have.has(k))) continue;
+            const id = cid(c);
+            if (usedIds.has(id)) continue;
+            usedIds.add(id);
+            const title = c.title || (c.body ? c.body.split('\n')[0].slice(0, 120) : '(sin título)');
+            have.add(c.category + '|' + normTitle(title));
+            next.push({
+              id, category: c.category, title,
+              formats: { image: c.fmtHint !== 'reels', reels: c.fmtHint === 'reels' },
+              destinations: { page: true, group: true, instagram: false },
+              status: 'draft', source: c.source ? (c.source + ' (content-import)') : 'content-import',
+              postedAt: null, notes: '',
+            });
+            added++;
+          }
+          localStorage.setItem(flagKey, '1');
+          if (added > 0) {
+            console.log('Content import: added ' + added + ' new draft rows.');
+            setPosts(next);
+          }
+        })
+        .catch(err => { console.error('content import failed', err); enrichDoneRef.current = false; });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [posts, auth.status, contentMap]);
 
     // ----- Derived data -----
     const dupMap = useMemo(() => {
@@ -803,6 +882,7 @@
         const inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
         if (e.key === 'Escape') {
           if (inField) { t.blur(); return; }
+          if (detailId) { setDetailId(null); return; }
           if (modal) { setModal(null); return; }
           if (search) { setSearch(''); setPage(0); return; }
           return;
@@ -828,6 +908,7 @@
       ${DefaultsModal({ open: modal === 'defaults', close: () => setModal(null), defaults, setDefault, applyToDrafts: applyDefaultsToDrafts })}
       ${SaveViewModal({ open: modal === 'saveView', close: () => setModal(null), name: viewName, setName: setViewName, submit: saveView })}
       ${HelpModal({ open: modal === 'help', close: () => setModal(null) })}
+      ${DetailDrawer({ post: posts.find(p => p.id === detailId) || null, contentMap, close: () => setDetailId(null), updatePost, toggleStar })}
       ${ImportMdModal({ open: modal === 'importMd', close: () => { setModal(null); setMdPreview(null); }, preview: mdPreview, onFiles: readMdFiles, confirm: confirmImportMd, dragActive, setDragActive })}
 
       <div class="ct_app" style="min-height: 100vh; padding: 28px 32px 80px; max-width: 1640px; margin: 0 auto;">
@@ -981,7 +1062,7 @@
 
         <!-- Table -->
         <div style="background: #fff; border: 1px solid #dde4ef; border-radius: 0 0 8px 8px; overflow: hidden;">
-          <div class="ct_table_header" style="display: grid; grid-template-columns: 44px 40px 56px 150px minmax(240px, 440px) 110px 160px 250px 50px 1fr; align-items: center; padding: 0 4px; background: #f4f6fa; border-bottom: 1px solid #dde4ef; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; height: 38px;">
+          <div class="ct_table_header" style="display: grid; grid-template-columns: 44px 40px 56px 150px minmax(240px, 440px) 110px 160px 250px 76px 1fr; align-items: center; padding: 0 4px; background: #f4f6fa; border-bottom: 1px solid #dde4ef; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; height: 38px;">
             <div style="display: flex; justify-content: center;">
               <input type="checkbox" checked=${visible.length  > 0 && visible.every(p => selected[p.id])} onChange=${toggleSelectAll} style="cursor: pointer; width: 14px; height: 14px; accent-color: #0d2340;" />
             </div>
@@ -1004,7 +1085,7 @@
             </div>
           ` : null}
 
-          ${visible.map((p, i) => Row({ p, index: start + i, dupMap, selected, setSelected, updatePost, removePost, toggleStar }))}
+          ${visible.map((p, i) => Row({ p, index: start + i, dupMap, selected, setSelected, updatePost, removePost, toggleStar, openDetail: setDetailId }))}
         </div>
 
         <div class="ct_footer" style="display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 14px; padding: 0 4px; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #4a6fa5; letter-spacing: 0.08em; text-transform: uppercase;">
@@ -1037,7 +1118,7 @@
   }
 
   // ---------------- Row component ----------------
-  function Row({ p, index, dupMap, selected, setSelected, updatePost, removePost, toggleStar }) {
+  function Row({ p, index, dupMap, selected, setSelected, updatePost, removePost, toggleStar, openDetail }) {
     const cat = catColor(p.category);
     const isSel = !!selected[p.id];
     const f = p.formats || {};
@@ -1060,7 +1141,7 @@
     };
 
     return html`
-      <div class=${'row ct_row ' + (isSel ? 'selected' : '')} style="display: grid; grid-template-columns: 44px 40px 56px 150px minmax(240px, 440px) 110px 160px 250px 50px 1fr; align-items: center; padding: 0 4px; border-bottom: 1px solid #eef2f8; min-height: 84px; background: ${(index % 2 === 0) ? '#ffffff' : '#f6f8fc'};">
+      <div class=${'row ct_row ' + (isSel ? 'selected' : '')} style="display: grid; grid-template-columns: 44px 40px 56px 150px minmax(240px, 440px) 110px 160px 250px 76px 1fr; align-items: center; padding: 0 4px; border-bottom: 1px solid #eef2f8; min-height: 84px; background: ${(index % 2 === 0) ? '#ffffff' : '#f6f8fc'};">
         <div style="display: flex; justify-content: center;">
           <input type="checkbox" checked=${isSel} onChange=${() => setSelected(s => { const c = { ...s }; if (c[p.id]) delete c[p.id]; else c[p.id] = true; return c; })} style="cursor: pointer; width: 14px; height: 14px; accent-color: #0d2340;" />
         </div>
@@ -1116,12 +1197,114 @@
             <button onClick=${() => updatePost(p.id, { status: 'rejected' })} style="padding: 4px 7px; font-size: 10px; font-weight: 700; color: ${sRej.fg}; background: ${sRej.bg}; border: none; border-radius: 3px; cursor: pointer; letter-spacing: 0.05em; font-family: 'JetBrains Mono', monospace;">REJ</button>
           </div>
         </div>
-        <div style="display: flex; justify-content: center;">
+        <div style="display: flex; align-items: center; justify-content: center; gap: 2px;">
+          <button onClick=${() => openDetail(p.id)} title="View full details" style="display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; color: #9bb3d4; background: transparent; border: none; border-radius: 4px; cursor: pointer;">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
           <button onClick=${() => removePost(p.id)} title="Delete post" style="display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; color: #9bb3d4; background: transparent; border: none; border-radius: 4px; cursor: pointer;">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
           </button>
         </div>
         <div></div>
+      </div>
+    `;
+  }
+
+  // ---------------- Detail drawer ----------------
+  const STATUS_META = {
+    next:      { label: 'Next',      color: '#e8734a', fg: '#fff' },
+    draft:     { label: 'Draft',     color: '#5a6470', fg: '#fff' },
+    scheduled: { label: 'Scheduled', color: '#e8b04a', fg: '#0d2340' },
+    published: { label: 'Published', color: '#7dd3a4', fg: '#0d2340' },
+    rejected:  { label: 'Rejected',  color: '#c44545', fg: '#fff' },
+  };
+  function detailToast(text, label) {
+    if (!text) return;
+    try { navigator.clipboard.writeText(text); } catch (e) {}
+    const el = document.getElementById('ct_detail_toast');
+    if (el) {
+      el.textContent = 'Copied ' + label;
+      el.style.opacity = '1';
+      clearTimeout(window.__ctToastTimer);
+      window.__ctToastTimer = setTimeout(() => { el.style.opacity = '0'; }, 1400);
+    }
+  }
+  function DetailDrawer({ post, contentMap, close, updatePost, toggleStar }) {
+    if (!post) return null;
+    const c = catColor(post.category);
+    const st = STATUS_META[post.status || 'draft'] || STATUS_META.draft;
+    const f = post.formats || {}, d = post.destinations || {};
+    // Join content (body/caption/closer/prompt) from the static content map by key; the post's
+    // own fields win when present (manual edits).
+    const cm = contentMap || {};
+    const lookup = cm[post.category + '|' + normTitle(post.title)] || null;
+    const body = (post.body || (lookup && lookup.body) || '').trim();
+    const closer = (post.closer || (lookup && lookup.closer) || '').trim();
+    const attribution = (post.attribution || (lookup && lookup.attribution) || '').trim();
+    const caption = (post.caption || (lookup && lookup.caption) || '').trim();
+    const notes = (post.notes || '').trim();
+    const prompt = (post.prompt || (lookup && lookup.prompt) || '').trim();
+    const hashtags = caption.match(/#\S+/g) || [];
+    const fmtParts = []; if (f.image) fmtParts.push('Image'); if (f.reels) fmtParts.push('Reels');
+    const destParts = []; if (d.page) destParts.push('FB Page'); if (d.group) destParts.push('FB Group'); if (d.instagram) destParts.push('Instagram');
+    const fullPost = [post.title, body, closer, attribution, caption].filter(x => x && x.trim()).join('\n\n');
+    const labelStyle = "font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase; margin-bottom: 7px;";
+    const boxStyle = "padding: 12px 14px; background: #f7f9fc; border: 1px solid #eef2f8; border-radius: 6px; font-size: 14px; line-height: 1.6; color: #1a2c44; white-space: pre-wrap; word-break: break-word;";
+    const copyBtn = "display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; font-size: 12px; font-weight: 600; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 5px; cursor: pointer;";
+    const statusBtn = (key) => {
+      const active = (post.status || 'draft') === key;
+      const m = STATUS_META[key];
+      return "flex: 1; padding: 8px 4px; font-size: 11px; font-weight: 700; color: " + (active ? m.fg : '#7a8db0') + "; background: " + (active ? m.color : 'transparent') + "; border: 1px solid " + (active ? m.color : '#dde4ef') + "; border-radius: 5px; cursor: pointer; letter-spacing: 0.04em; font-family: 'JetBrains Mono', monospace;";
+    };
+    return html`
+      <div onClick=${close} style="position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 60;"></div>
+      <div onClick=${e => e.stopPropagation()} style="position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw); z-index: 61; background: #fff; box-shadow: -12px 0 40px rgba(13,35,64,0.22); display: flex; flex-direction: column;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid #eef2f8; flex-shrink: 0;">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 11px; font-weight: 600; color: ${c.fg}; background: ${c.bg}; border: 1px solid ${c.border}; border-radius: 20px; font-family: 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: 0.04em;"><span style="width: 5px; height: 5px; border-radius: 50%; background: ${c.fg};"></span>${post.category}</span>
+            <span style="display: inline-flex; align-items: center; padding: 4px 12px; font-size: 11px; font-weight: 700; color: ${st.fg}; background: ${st.color}; border-radius: 20px; font-family: 'JetBrains Mono', monospace; text-transform: uppercase; letter-spacing: 0.04em;">${st.label}</span>
+          </div>
+          <button onClick=${close} title="Close (Esc)" style="display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; padding: 0; color: #9bb3d4; background: transparent; border: none; border-radius: 5px; cursor: pointer; font-size: 16px;">✕</button>
+        </div>
+        <div style="flex: 1; overflow-y: auto; padding: 22px 20px;">
+          <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 18px;">
+            <h2 style="margin: 0; font-size: 21px; font-weight: 700; line-height: 1.3; color: #0d2340;">${post.title}</h2>
+            <button onClick=${() => toggleStar(post.id)} title="Featured post" style="flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; background: transparent; border: 1px solid #eef2f8; border-radius: 6px; cursor: pointer; color: ${post.starred ? '#e8b04a' : '#c8d2e3'};">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill=${post.starred ? '#e8b04a' : 'none'} stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            </button>
+          </div>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px;">
+            <button onClick=${() => detailToast(fullPost, 'full post')} style="display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; font-size: 12px; font-weight: 600; color: #fff; background: #0d2340; border: none; border-radius: 5px; cursor: pointer;">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy full post
+            </button>
+            ${caption ? html`<button onClick=${() => detailToast(caption, 'caption')} style=${copyBtn}>Copy caption</button>` : null}
+            ${body ? html`<button onClick=${() => detailToast(body, 'body')} style=${copyBtn}>Copy body</button>` : null}
+            ${hashtags.length ? html`<button onClick=${() => detailToast(hashtags.join(' '), 'hashtags')} style=${copyBtn}>Copy hashtags</button>` : null}
+          </div>
+          ${body ? html`<div style="margin-bottom: 18px;"><div style=${labelStyle}>Body</div><div style=${boxStyle}>${body}</div></div>` : null}
+          ${closer ? html`<div style="margin-bottom: 18px;"><div style=${labelStyle}>Closer</div><div style=${boxStyle + ' font-style: italic;'}>${closer}</div></div>` : null}
+          ${attribution ? html`<div style="margin-bottom: 18px;"><div style=${labelStyle}>Attribution</div><div style=${boxStyle}>${attribution}</div></div>` : null}
+          ${caption ? html`<div style="margin-bottom: 18px;"><div style=${labelStyle}>Caption</div><div style=${boxStyle}>${caption}</div>${hashtags.length ? html`<div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;">${hashtags.map(t => html`<span style="display: inline-flex; align-items: center; padding: 3px 9px; font-size: 12px; font-weight: 600; color: #1f5cc7; background: #eaf1fb; border: 1px solid #cfe0f7; border-radius: 20px; font-family: 'JetBrains Mono', monospace;">${t}</span>`)}</div>` : null}</div>` : null}
+          ${prompt ? html`<div style="margin-bottom: 18px;"><div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px;"><div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600; letter-spacing: 0.12em; color: #4a6fa5; text-transform: uppercase;">Image prompt</div><button onClick=${() => detailToast(prompt, 'image prompt')} style="padding: 3px 9px; font-size: 11px; font-weight: 600; color: #0d2340; background: #f4f6fa; border: 1px solid #dde4ef; border-radius: 4px; cursor: pointer;">Copy</button></div><div style="padding: 12px 14px; background: #f7f9fc; border: 1px solid #eef2f8; border-radius: 6px; font-size: 13px; line-height: 1.55; color: #4a6fa5; white-space: pre-wrap; word-break: break-word;">${prompt}</div></div>` : null}
+          ${notes ? html`<div style="margin-bottom: 18px;"><div style=${labelStyle}>Notes</div><div style=${boxStyle}>${notes}</div></div>` : null}
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 22px; padding-top: 20px; border-top: 1px dashed #dde4ef;">
+            <div><div style="${labelStyle} color: #9bb3d4;">Format</div><div style="font-size: 13px; font-weight: 600; color: #0d2340;">${fmtParts.length ? fmtParts.join(', ') : '—'}</div></div>
+            <div><div style="${labelStyle} color: #9bb3d4;">Destinations</div><div style="font-size: 13px; font-weight: 600; color: #0d2340;">${destParts.length ? destParts.join(', ') : '—'}</div></div>
+            <div style="grid-column: 1 / -1;"><div style="${labelStyle} color: #9bb3d4;">Source file</div><div style="font-size: 12px; font-weight: 500; color: #4a6fa5; font-family: 'JetBrains Mono', monospace; word-break: break-all;">${post.source || '—'}</div></div>
+          </div>
+        </div>
+        <div style="flex-shrink: 0; padding: 14px 20px; border-top: 1px solid #eef2f8; background: #fafbfd;">
+          <div style=${labelStyle}>Set status</div>
+          <div style="display: flex; gap: 6px;">
+            <button onClick=${() => updatePost(post.id, { status: 'next' })} style=${statusBtn('next')}>NEXT</button>
+            <button onClick=${() => updatePost(post.id, { status: 'draft' })} style=${statusBtn('draft')}>DRAFT</button>
+            <button onClick=${() => updatePost(post.id, { status: 'scheduled' })} style=${statusBtn('scheduled')}>SCHED</button>
+            <button onClick=${() => updatePost(post.id, { status: 'published' })} style=${statusBtn('published')}>PUB</button>
+            <button onClick=${() => updatePost(post.id, { status: 'rejected' })} style=${statusBtn('rejected')}>REJ</button>
+          </div>
+        </div>
+        <div id="ct_detail_toast" style="position: absolute; bottom: 78px; left: 50%; transform: translateX(-50%); padding: 8px 16px; background: #0d2340; color: #fff; font-size: 12px; font-weight: 600; border-radius: 20px; box-shadow: 0 6px 18px rgba(13,35,64,0.3); opacity: 0; transition: opacity 0.18s; pointer-events: none; z-index: 62;"></div>
       </div>
     `;
   }

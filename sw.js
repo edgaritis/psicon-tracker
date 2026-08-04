@@ -1,12 +1,13 @@
 // PsiCon Content Tracker — service worker
 // Cache the app shell so the PWA works fully offline after first load.
 
-const CACHE_VERSION = 'psicon-tracker-v15';
+const CACHE_VERSION = 'psicon-tracker-v17';
 const APP_SHELL = [
   './',
   './index.html',
-  './app.js?v=15',
+  './app.js?v=17',
   './seed.json',
+  './content.json',
   './manifest.json',
   './icon.svg',
   './icon-192.png',
